@@ -49,6 +49,7 @@ export interface LocalSubmission {
   otherStatus?: string;
   posterImageUrl: string;
   posterTemplateId?: string;
+  posterTemplateName?: string;
   downloadCount?: number;
   lastDownloadedAt?: string;
   createdAt: string;
@@ -220,54 +221,73 @@ export function getLocalSubmissions(): LocalSubmission[] {
 }
 
 export function saveLocalSubmission(sub: LocalSubmission): void {
-  const normContact = normalizeContact(sub.contact || sub.contactNormalized);
-  const normName = normalizeName(sub.fullName);
+  const rawContact = (sub.contact || sub.contactNormalized || '').trim();
+  const rawName = (sub.fullName || '').trim();
+  const normContact = normalizeContact(rawContact);
+  const normName = normalizeName(rawName);
+  const targetPosterId = sub.posterTemplateId || 'utq-20th-anniversary-default';
   const now = new Date().toISOString();
 
-  // 1. Save to local storage with intelligent deduplication
+  // 1. Save to local storage with intelligent per-poster deduplication
   try {
     const list = getLocalSubmissions();
     const existingIdx = list.findIndex(item => {
+      const itemPosterId = item.posterTemplateId || 'utq-20th-anniversary-default';
+      if (itemPosterId && targetPosterId && itemPosterId !== targetPosterId) {
+        return false; // Different event folder!
+      }
       const itemNormContact = normalizeContact(item.contact || item.contactNormalized || '');
       const itemNormName = normalizeName(item.fullName || '');
-      return (
-        (itemNormContact && itemNormContact === normContact) ||
-        (itemNormName && normName && itemNormName === normName && itemNormContact === normContact)
-      );
+      const contactMatches = Boolean(normContact && itemNormContact && normContact === itemNormContact);
+      const nameAndContactMatches = Boolean(normName && itemNormName && normName === itemNormName && normContact === itemNormContact);
+      return contactMatches || nameAndContactMatches;
     });
 
     if (existingIdx >= 0) {
       const existing = list[existingIdx];
+      const curDownloads = typeof existing.downloadCount === 'number' ? existing.downloadCount : 1;
       list[existingIdx] = {
         ...existing,
         ...sub,
-        contactNormalized: normContact,
-        downloadCount: (existing.downloadCount || 1) + 1,
+        fullName: rawName || existing.fullName,
+        contact: rawContact || existing.contact,
+        contactNormalized: normContact || existing.contactNormalized,
+        posterTemplateId: targetPosterId,
+        posterTemplateName: sub.posterTemplateName || existing.posterTemplateName,
+        downloadCount: curDownloads + 1,
         lastDownloadedAt: now,
         updatedAt: now
       };
     } else {
       list.unshift({
         ...sub,
+        id: sub.id || `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        fullName: rawName || 'Attendee',
+        contact: rawContact,
         contactNormalized: normContact,
+        posterTemplateId: targetPosterId,
+        posterTemplateName: sub.posterTemplateName,
         downloadCount: sub.downloadCount || 1,
         lastDownloadedAt: now,
         createdAt: sub.createdAt || now,
         updatedAt: now
       });
     }
-    localStorage.setItem(LOCAL_STORAGE_SUBMISSIONS_KEY, JSON.stringify(list.slice(0, 500)));
+    localStorage.setItem(LOCAL_STORAGE_SUBMISSIONS_KEY, JSON.stringify(list.slice(0, 1000)));
   } catch (err) {
     console.warn('Failed to save to local storage', err);
   }
 
-  // 2. Sync to Server API
+  // 2. Sync to Server API (and Supabase backend)
   fetch('/api/attendees', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       ...sub,
+      fullName: rawName,
+      contact: rawContact,
       contactNormalized: normContact,
+      posterTemplateId: targetPosterId,
       isDownload: true
     })
   }).catch(err => console.warn('Could not sync attendee to server API:', err));
@@ -280,49 +300,60 @@ export async function recordAttendeeDownload(sub: {
   otherStatus?: string;
   posterImageUrl?: string;
   posterTemplateId?: string;
+  posterTemplateName?: string;
 }): Promise<void> {
-  const normContact = normalizeContact(sub.contact);
-  const normName = normalizeName(sub.fullName);
+  const rawContact = (sub.contact || '').trim();
+  const rawName = (sub.fullName || '').trim();
+  const normContact = normalizeContact(rawContact);
+  const normName = normalizeName(rawName);
+  const targetPosterId = sub.posterTemplateId || 'utq-20th-anniversary-default';
   const now = new Date().toISOString();
 
   // 1. Local Storage
   try {
     const list = getLocalSubmissions();
     const existingIdx = list.findIndex(item => {
+      const itemPosterId = item.posterTemplateId || 'utq-20th-anniversary-default';
+      if (itemPosterId && targetPosterId && itemPosterId !== targetPosterId) {
+        return false;
+      }
       const itemNormContact = normalizeContact(item.contact || item.contactNormalized || '');
       const itemNormName = normalizeName(item.fullName || '');
-      return (
-        (itemNormContact && itemNormContact === normContact) ||
-        (itemNormName && normName && itemNormName === normName && itemNormContact === normContact)
-      );
+      const contactMatches = Boolean(normContact && itemNormContact && normContact === itemNormContact);
+      const nameAndContactMatches = Boolean(normName && itemNormName && normName === itemNormName && normContact === itemNormContact);
+      return contactMatches || nameAndContactMatches;
     });
 
     if (existingIdx >= 0) {
       const existing = list[existingIdx];
+      const curDownloads = typeof existing.downloadCount === 'number' ? existing.downloadCount : 1;
       list[existingIdx] = {
         ...existing,
-        downloadCount: (existing.downloadCount || 1) + 1,
+        downloadCount: curDownloads + 1,
         lastDownloadedAt: now,
         updatedAt: now,
-        posterImageUrl: sub.posterImageUrl || existing.posterImageUrl
+        posterImageUrl: sub.posterImageUrl || existing.posterImageUrl,
+        posterTemplateId: targetPosterId,
+        posterTemplateName: sub.posterTemplateName || existing.posterTemplateName
       };
     } else {
       list.unshift({
-        id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
-        fullName: sub.fullName.trim(),
-        contact: sub.contact.trim(),
+        id: `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        fullName: rawName || 'Attendee',
+        contact: rawContact,
         contactNormalized: normContact,
         status: sub.status || 'Attendee',
-        otherStatus: sub.otherStatus,
+        otherStatus: sub.otherStatus || '',
         posterImageUrl: sub.posterImageUrl || '',
-        posterTemplateId: sub.posterTemplateId,
+        posterTemplateId: targetPosterId,
+        posterTemplateName: sub.posterTemplateName || '',
         downloadCount: 1,
         lastDownloadedAt: now,
         createdAt: now,
         updatedAt: now
       });
     }
-    localStorage.setItem(LOCAL_STORAGE_SUBMISSIONS_KEY, JSON.stringify(list.slice(0, 500)));
+    localStorage.setItem(LOCAL_STORAGE_SUBMISSIONS_KEY, JSON.stringify(list.slice(0, 1000)));
   } catch (err) {
     console.warn('Local download record error:', err);
   }
@@ -334,7 +365,10 @@ export async function recordAttendeeDownload(sub: {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ...sub,
-        contactNormalized: normContact
+        fullName: rawName,
+        contact: rawContact,
+        contactNormalized: normContact,
+        posterTemplateId: targetPosterId
       })
     });
   } catch (err) {
@@ -342,20 +376,150 @@ export async function recordAttendeeDownload(sub: {
   }
 }
 
-export async function fetchAllAttendees(): Promise<LocalSubmission[]> {
+export async function deleteAttendee(id: string): Promise<void> {
+  // 1. Delete locally
   try {
-    const res = await fetch('/api/attendees');
+    const list = getLocalSubmissions().filter(a => a.id !== id);
+    localStorage.setItem(LOCAL_STORAGE_SUBMISSIONS_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn('Could not remove attendee from local storage:', err);
+  }
+
+  // 2. Delete on Server API
+  try {
+    await fetch(`/api/attendees/${id}`, {
+      method: 'DELETE'
+    });
+  } catch (err) {
+    console.warn('Could not delete attendee on server:', err);
+  }
+
+  // 3. Delete from Supabase if configured
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase.from('attendees').delete().eq('id', id);
+    } catch (err) {
+      console.warn('Could not delete attendee on Supabase:', err);
+    }
+  }
+}
+
+export async function fetchAllAttendees(): Promise<LocalSubmission[]> {
+  const localList = getLocalSubmissions();
+  let serverList: LocalSubmission[] = [];
+  let supabaseList: LocalSubmission[] = [];
+
+  // 1. Fetch from authoritative Server API
+  try {
+    const res = await fetch(`/api/attendees?t=${Date.now()}`, {
+      cache: 'no-store'
+    });
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data.attendees) && data.attendees.length > 0) {
-        return data.attendees;
+      if (Array.isArray(data.attendees)) {
+        serverList = data.attendees;
       }
     }
   } catch {
     // API server offline
   }
 
-  return getLocalSubmissions();
+  // 2. Fetch from Supabase if configured
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('attendees')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (!error && Array.isArray(data)) {
+        supabaseList = data.map((d: any) => ({
+          id: String(d.id),
+          fullName: d.full_name || d.fullName || 'Attendee',
+          contact: d.contact || '',
+          contactNormalized: normalizeContact(d.contact || ''),
+          status: d.status || d.role || 'Attendee',
+          otherStatus: d.other_role || d.other_status || d.otherStatus || '',
+          posterImageUrl: d.poster_url || d.poster_image_url || d.posterUrl || '',
+          posterTemplateId: d.poster_template_id || d.poster_id || d.posterTemplateId || 'utq-20th-anniversary-default',
+          posterTemplateName: d.poster_template_name || d.posterTemplateName,
+          downloadCount: Number(d.download_count || d.downloadCount) || 1,
+          lastDownloadedAt: d.last_downloaded_at || d.lastDownloadedAt || d.created_at,
+          createdAt: d.created_at || d.createdAt || new Date().toISOString(),
+          updatedAt: d.updated_at || d.updatedAt
+        }));
+      }
+    } catch (err) {
+      console.warn('Supabase fetch error:', err);
+    }
+  }
+
+  // Combine and deduplicate across serverList, supabaseList, and localList
+  // Rule: deduplicate strictly per poster event folder!
+  const combined: LocalSubmission[] = [];
+
+  const addOrMerge = (item: LocalSubmission) => {
+    const normC = normalizeContact(item.contact || item.contactNormalized || '');
+    const normN = normalizeName(item.fullName || '');
+    const itemPosterId = item.posterTemplateId || 'utq-20th-anniversary-default';
+
+    const existingIdx = combined.findIndex(c => {
+      const cPosterId = c.posterTemplateId || 'utq-20th-anniversary-default';
+      if (cPosterId && itemPosterId && cPosterId !== itemPosterId) {
+        return false; // Distinct event posters are kept independent
+      }
+      const cNormC = normalizeContact(c.contact || c.contactNormalized || '');
+      const cNormN = normalizeName(c.fullName || '');
+      const contactMatches = Boolean(normC && cNormC && normC === cNormC);
+      const nameAndContactMatches = Boolean(normN && cNormN && normN === cNormN && normC === cNormC);
+      return contactMatches || nameAndContactMatches;
+    });
+
+    if (existingIdx >= 0) {
+      const exist = combined[existingIdx];
+      const maxDownloads = Math.max(exist.downloadCount || 1, item.downloadCount || 1);
+      const latestDownloadedAt = (new Date(item.lastDownloadedAt || 0) > new Date(exist.lastDownloadedAt || 0))
+        ? (item.lastDownloadedAt || exist.lastDownloadedAt)
+        : (exist.lastDownloadedAt || item.lastDownloadedAt);
+      const latestImage = item.posterImageUrl || exist.posterImageUrl;
+      const latestTemplateId = item.posterTemplateId || exist.posterTemplateId;
+      const latestTemplateName = item.posterTemplateName || exist.posterTemplateName;
+
+      combined[existingIdx] = {
+        ...exist,
+        fullName: item.fullName || exist.fullName,
+        contact: item.contact || exist.contact,
+        contactNormalized: normC || exist.contactNormalized,
+        status: item.status || exist.status,
+        otherStatus: item.otherStatus !== undefined ? item.otherStatus : exist.otherStatus,
+        posterImageUrl: latestImage,
+        posterTemplateId: latestTemplateId,
+        posterTemplateName: latestTemplateName,
+        downloadCount: maxDownloads,
+        lastDownloadedAt: latestDownloadedAt
+      };
+    } else {
+      combined.push({
+        ...item,
+        contactNormalized: normC,
+        posterTemplateId: itemPosterId,
+        downloadCount: item.downloadCount || 1
+      });
+    }
+  };
+
+  // Process server list first (most authoritative), then local, then supabase
+  serverList.forEach(addOrMerge);
+  localList.forEach(addOrMerge);
+  supabaseList.forEach(addOrMerge);
+
+  // Update local storage cache
+  if (combined.length > 0) {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_SUBMISSIONS_KEY, JSON.stringify(combined.slice(0, 1000)));
+    } catch {}
+  }
+
+  return combined;
 }
 
 // ----------------------------------------------------

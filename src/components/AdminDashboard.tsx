@@ -37,12 +37,20 @@ import {
   RotateCcw,
   Sliders,
   Image as ImageIcon,
-  DollarSign
+  DollarSign,
+  Folder,
+  FolderOpen,
+  CheckCircle2,
+  Trash,
+  SlidersHorizontal,
+  ExternalLink
 } from 'lucide-react';
 import { 
   supabase, 
   isSupabaseConfigured, 
-  getLocalSubmissions, 
+  fetchAllAttendees,
+  deleteAttendee,
+  fetchAllPosterTemplates,
   fetchAdminProfileByEmail,
   fetchAllAdminProfiles,
   requestAdminAccess,
@@ -66,11 +74,16 @@ export interface AttendeeRecord {
   id: string;
   fullName: string;
   contact: string;
+  contactNormalized?: string;
   role: string;
   otherRole?: string;
   posterUrl?: string;
   posterTemplateId?: string;
+  posterTemplateName?: string;
+  downloadCount?: number;
+  lastDownloadedAt?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 interface AdminDashboardProps {
@@ -91,11 +104,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
 
   // Data states
   const [attendees, setAttendees] = useState<AttendeeRecord[]>([]);
+  const [posterTemplates, setPosterTemplates] = useState<PosterTemplate[]>([]);
   const [adminProfiles, setAdminProfiles] = useState<AdminProfile[]>([]);
   const [activeTemplate, setActiveTemplate] = useState<PosterTemplate | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsSuccess, setSettingsSuccess] = useState(false);
+
+  // Folder Filtering state ('all' or template.id)
+  const [selectedFolderId, setSelectedFolderId] = useState<string>('all');
+
+  // Delete attendee confirmation state
+  const [attendeeToDelete, setAttendeeToDelete] = useState<AttendeeRecord | null>(null);
+  const [isDeletingAttendee, setIsDeletingAttendee] = useState(false);
 
   // Product modal state
   const [editingProduct, setEditingProduct] = useState<MerchandiseProduct | null>(null);
@@ -110,7 +131,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRole, setSelectedRole] = useState<string>('all');
-  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'name'>('newest');
+  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'name' | 'downloads'>('newest');
   const [previewPoster, setPreviewPoster] = useState<{ url: string; name: string } | null>(null);
 
   // Check existing session
@@ -125,67 +146,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
     }
   }, []);
 
-  // Fetch attendees, admin profiles, and app settings
-  const loadData = async () => {
-    setLoading(true);
+  // Fetch attendees, templates, admin profiles, and app settings
+  const loadData = async (isBackground = false) => {
+    if (!isBackground) setLoading(true);
     try {
-      // 1. Fetch active template
-      const currentActive = await fetchActivePosterTemplate();
-      setActiveTemplate(currentActive);
+      // 1. Fetch active template & all templates for folders
+      const [currentActive, allTemplates, currentSettings, allAttendees] = await Promise.all([
+        fetchActivePosterTemplate(),
+        fetchAllPosterTemplates(),
+        fetchAppSettings(),
+        fetchAllAttendees()
+      ]);
 
-      // 2. Fetch app settings (Thank you note & CTA)
-      const currentSettings = await fetchAppSettings();
+      setActiveTemplate(currentActive);
+      setPosterTemplates(allTemplates);
       setSettings(currentSettings);
 
-      // 3. Fetch attendees
-      let records: AttendeeRecord[] = [];
+      // 2. Map all attendees with template name resolution & deduplication details
+      const templateMap = new Map<string, string>();
+      allTemplates.forEach(t => {
+        templateMap.set(t.id, t.name);
+      });
 
-      if (isSupabaseConfigured && supabase) {
-        try {
-          const { data, error } = await supabase
-            .from('attendees')
-            .select('*')
-            .order('created_at', { ascending: false });
+      const mappedRecords: AttendeeRecord[] = allAttendees.map(item => {
+        const resolvedTemplateName = item.posterTemplateName || 
+          (item.posterTemplateId ? templateMap.get(item.posterTemplateId) : undefined) || 
+          (currentActive ? currentActive.name : '20th Anniversary');
 
-          if (!error && data && data.length > 0) {
-            records = data.map((item: any) => ({
-              id: String(item.id || item.contact),
-              fullName: item.full_name || item.fullName || 'Attendee',
-              contact: item.contact || '',
-              role: item.role || item.status || 'Attendee',
-              otherRole: item.other_role || item.otherStatus || '',
-              posterUrl: item.poster_url || item.posterImageUrl || undefined,
-              posterTemplateId: item.poster_template_id || undefined,
-              createdAt: item.created_at || item.updated_at || new Date().toISOString()
-            }));
-          }
-        } catch (dbErr) {
-          console.warn('Supabase attendees fetch note:', dbErr);
-        }
-      }
+        return {
+          id: item.id,
+          fullName: item.fullName,
+          contact: item.contact,
+          contactNormalized: item.contactNormalized,
+          role: item.status || 'Attendee',
+          otherRole: item.otherStatus,
+          posterUrl: item.posterImageUrl || undefined,
+          posterTemplateId: item.posterTemplateId,
+          posterTemplateName: resolvedTemplateName,
+          downloadCount: typeof item.downloadCount === 'number' ? item.downloadCount : 1,
+          lastDownloadedAt: item.lastDownloadedAt || item.createdAt,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt
+        };
+      });
 
-      // Merge with local storage submissions
-      const local = getLocalSubmissions();
-      const existingContacts = new Set(records.map(r => r.contact.toLowerCase()));
+      setAttendees(mappedRecords);
 
-      for (const loc of local) {
-        if (!existingContacts.has(loc.contact.toLowerCase()) && !existingContacts.has(loc.contactNormalized.toLowerCase())) {
-          records.push({
-            id: loc.id,
-            fullName: loc.fullName,
-            contact: loc.contact,
-            role: loc.status,
-            otherRole: loc.otherStatus,
-            posterUrl: loc.posterImageUrl,
-            posterTemplateId: loc.posterTemplateId,
-            createdAt: loc.createdAt
-          });
-        }
-      }
-
-      setAttendees(records);
-
-      // 4. If Master Admin, fetch all admin profiles
+      // 3. If Master Admin, fetch all admin profiles
       if (currentUser?.is_master) {
         const admins = await fetchAllAdminProfiles();
         setAdminProfiles(admins);
@@ -193,14 +200,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
     } finally {
-      setLoading(false);
+      if (!isBackground) setLoading(false);
     }
   };
 
+  // Periodic background auto-sync so newly downloaded attendees appear live
   useEffect(() => {
-    if (currentUser) {
-      loadData();
-    }
+    if (!currentUser) return;
+    loadData(false);
+
+    const interval = setInterval(() => {
+      loadData(true);
+    }, 8000);
+
+    return () => clearInterval(interval);
   }, [currentUser]);
 
   // Auth Handler: Sign In
@@ -450,21 +463,36 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
   // Filter and sort attendees
   const filteredAttendees = attendees
     .filter(a => {
+      // 1. Poster Folder filtering
+      if (selectedFolderId !== 'all') {
+        const matchesFolder = 
+          a.posterTemplateId === selectedFolderId || 
+          (posterTemplates.find(t => t.id === selectedFolderId)?.name && 
+           a.posterTemplateName?.toLowerCase() === posterTemplates.find(t => t.id === selectedFolderId)?.name.toLowerCase());
+        if (!matchesFolder) return false;
+      }
+
+      // 2. Search query filtering
       const query = searchQuery.toLowerCase().trim();
-      if (!query) return true;
+      if (query) {
+        const matchesSearch = 
+          a.fullName.toLowerCase().includes(query) ||
+          a.contact.toLowerCase().includes(query) ||
+          a.role.toLowerCase().includes(query) ||
+          (a.otherRole && a.otherRole.toLowerCase().includes(query)) ||
+          (a.posterTemplateName && a.posterTemplateName.toLowerCase().includes(query));
+        if (!matchesSearch) return false;
+      }
 
-      const matchesSearch = 
-        a.fullName.toLowerCase().includes(query) ||
-        a.contact.toLowerCase().includes(query) ||
-        a.role.toLowerCase().includes(query) ||
-        (a.otherRole && a.otherRole.toLowerCase().includes(query));
-
+      // 3. Role filter
       const matchesRole = selectedRole === 'all' || a.role === selectedRole;
-      return matchesSearch && matchesRole;
+      return matchesRole;
     })
     .sort((a, b) => {
       if (sortOrder === 'newest') {
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        const timeA = new Date(a.lastDownloadedAt || a.createdAt).getTime();
+        const timeB = new Date(b.lastDownloadedAt || b.createdAt).getTime();
+        return timeB - timeA;
       }
       if (sortOrder === 'oldest') {
         return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
@@ -472,18 +500,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
       if (sortOrder === 'name') {
         return a.fullName.localeCompare(b.fullName);
       }
+      if (sortOrder === 'downloads') {
+        return (b.downloadCount || 1) - (a.downloadCount || 1);
+      }
       return 0;
     });
 
-  // Export handlers
+  // Export handlers (respects active folder filter)
+  const currentFolderName = selectedFolderId === 'all' 
+    ? (activeTemplate?.name || 'UTQ 20th Anniversary')
+    : (posterTemplates.find(t => t.id === selectedFolderId)?.name || 'Event Folder');
+
   const handleExportExcel = () => {
     const dataToExport = filteredAttendees.length > 0 ? filteredAttendees : attendees;
-    exportToExcel(dataToExport, activeTemplate?.name || 'UTQ 20th Anniversary');
+    exportToExcel(dataToExport, currentFolderName);
   };
 
   const handleExportPDF = () => {
     const dataToExport = filteredAttendees.length > 0 ? filteredAttendees : attendees;
-    exportToPDF(dataToExport, activeTemplate?.name || 'UTQ 20th Anniversary');
+    exportToPDF(dataToExport, currentFolderName);
+  };
+
+  // Delete attendee handler
+  const handleConfirmDeleteAttendee = async () => {
+    if (!attendeeToDelete) return;
+    setIsDeletingAttendee(true);
+    try {
+      await deleteAttendee(attendeeToDelete.id);
+      setAttendees(prev => prev.filter(a => a.id !== attendeeToDelete.id));
+      setAttendeeToDelete(null);
+    } catch (err) {
+      console.error('Failed to delete attendee:', err);
+    } finally {
+      setIsDeletingAttendee(false);
+    }
   };
 
   // ==========================================
@@ -837,25 +887,137 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
         )}
 
         {/* =========================================
-            TAB 2: ATTENDEES DIRECTORY
+            TAB 2: ATTENDEES DIRECTORY & POSTER FOLDERS
         ========================================== */}
         {activeTab === 'attendees' && (
           <div className="space-y-6">
+            {/* Poster Event Folders Section Header */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-4">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Folder className="w-4 h-4 text-amber-400" />
+                    <span>Event & Poster Folders</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Attendees and download records are categorized by poster event to prevent mix-ups during multi-poster campaigns.
+                  </p>
+                </div>
+                <div className="text-xs text-slate-400 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 font-mono">
+                  Active Folder: <span className="text-amber-400 font-semibold">{currentFolderName}</span>
+                </div>
+              </div>
+
+              {/* Folder Cards Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {/* "All Folders" Master Card */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedFolderId('all')}
+                  className={`p-3.5 rounded-xl border text-left transition flex flex-col justify-between cursor-pointer ${
+                    selectedFolderId === 'all'
+                      ? 'bg-amber-500/10 border-amber-500/40 shadow-xs'
+                      : 'bg-slate-950 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <FolderOpen className={`w-4 h-4 ${selectedFolderId === 'all' ? 'text-amber-400' : 'text-slate-400'}`} />
+                      <span className="text-xs font-bold text-white">All Event Folders</span>
+                    </div>
+                    {selectedFolderId === 'all' && (
+                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                    )}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between">
+                    <span className="text-lg font-bold text-white">{attendees.length}</span>
+                    <span className="text-[11px] text-slate-400">
+                      {attendees.reduce((acc, a) => acc + (a.downloadCount || 1), 0)} downloads
+                    </span>
+                  </div>
+                </button>
+
+                {/* Specific Template Folders */}
+                {posterTemplates.map(tmpl => {
+                  const folderAttendees = attendees.filter(a => 
+                    a.posterTemplateId === tmpl.id || 
+                    a.posterTemplateName?.toLowerCase() === tmpl.name.toLowerCase()
+                  );
+                  const folderDownloads = folderAttendees.reduce((acc, a) => acc + (a.downloadCount || 1), 0);
+                  const isSelected = selectedFolderId === tmpl.id;
+
+                  return (
+                    <button
+                      key={tmpl.id}
+                      type="button"
+                      onClick={() => setSelectedFolderId(tmpl.id)}
+                      className={`p-3.5 rounded-xl border text-left transition flex flex-col justify-between cursor-pointer ${
+                        isSelected
+                          ? 'bg-amber-500/10 border-amber-500/40 shadow-xs'
+                          : 'bg-slate-950 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-1">
+                        <div className="flex items-center gap-2 truncate">
+                          <Folder className={`w-4 h-4 shrink-0 ${isSelected ? 'text-amber-400' : 'text-blue-400'}`} />
+                          <span className="text-xs font-bold text-white truncate" title={tmpl.name}>
+                            {tmpl.name}
+                          </span>
+                        </div>
+                        {tmpl.is_active && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold uppercase tracking-wider shrink-0">
+                            Active
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-3 flex items-center justify-between">
+                        <span className="text-lg font-bold text-white">{folderAttendees.length}</span>
+                        <span className="text-[11px] text-slate-400">
+                          {folderDownloads} downloads
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Toolbar */}
-            <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 bg-slate-900 border border-slate-800 p-4 rounded-xl">
-              <div className="flex flex-wrap items-center gap-3 flex-1">
+            <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-4 rounded-xl">
+              <div className="flex flex-wrap items-center gap-2.5 flex-1">
                 {/* Search input */}
                 <div className="relative flex-1 min-w-[200px]">
-                  <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                  <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
                   <input
                     id="search-attendees-input"
                     type="text"
-                    placeholder="Search by name, contact, or role..."
+                    placeholder="Search name, contact, role, or poster..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2 text-xs text-white placeholder-slate-500 outline-none focus:border-[#DEA303]"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 outline-none focus:border-[#DEA303]"
                   />
                 </div>
+
+                {/* Folder filter dropdown */}
+                <select
+                  id="filter-folder-select"
+                  value={selectedFolderId}
+                  onChange={(e) => setSelectedFolderId(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-amber-300 outline-none focus:border-[#DEA303] font-medium"
+                >
+                  <option value="all">📁 All Folders ({attendees.length})</option>
+                  {posterTemplates.map(tmpl => {
+                    const count = attendees.filter(a => 
+                      a.posterTemplateId === tmpl.id || 
+                      a.posterTemplateName?.toLowerCase() === tmpl.name.toLowerCase()
+                    ).length;
+                    return (
+                      <option key={tmpl.id} value={tmpl.id}>
+                        📁 {tmpl.name} ({count})
+                      </option>
+                    );
+                  })}
+                </select>
 
                 {/* Role filter */}
                 <select
@@ -869,34 +1031,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
                     <option key={opt} value={opt}>{opt}</option>
                   ))}
                 </select>
+
+                {/* Sort selector */}
+                <select
+                  id="sort-attendees-select"
+                  value={sortOrder}
+                  onChange={(e) => setSortOrder(e.target.value as any)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 outline-none focus:border-[#DEA303]"
+                >
+                  <option value="newest">Sort: Recent Downloads</option>
+                  <option value="oldest">Sort: Oldest Registered</option>
+                  <option value="name">Sort: Name (A-Z)</option>
+                  <option value="downloads">Sort: Most Downloads</option>
+                </select>
               </div>
 
               {/* Action Buttons */}
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   id="btn-refresh-attendees"
-                  onClick={loadData}
+                  onClick={() => loadData(false)}
                   disabled={loading}
                   className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition cursor-pointer"
-                  title="Refresh Attendee List"
+                  title="Sync latest attendees & downloads"
                 >
-                  {loading ? <DottedLoader size="sm" color="#DEA303" /> : <RefreshCw size={16} />}
+                  {loading ? <DottedLoader size="sm" color="#DEA303" /> : <RefreshCw size={15} />}
                 </button>
 
                 <button
                   id="btn-export-excel"
                   onClick={handleExportExcel}
-                  className="px-3.5 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer"
+                  className="px-3.5 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  title={`Export ${currentFolderName} attendees to Excel`}
                 >
-                  <FileSpreadsheet size={15} /> Export Excel
+                  <FileSpreadsheet size={14} /> Export Excel
                 </button>
 
                 <button
                   id="btn-export-pdf"
                   onClick={handleExportPDF}
-                  className="px-3.5 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer"
+                  className="px-3.5 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  title={`Export ${currentFolderName} attendees to PDF`}
                 >
-                  <FileText size={15} /> Export PDF
+                  <FileText size={14} /> Export PDF
                 </button>
               </div>
             </div>
@@ -905,63 +1082,103 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
             <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs text-slate-300">
-                  <thead className="bg-slate-950/80 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                  <thead className="bg-slate-950/90 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
                     <tr>
-                      <th className="px-5 py-3.5">Full Name</th>
-                      <th className="px-5 py-3.5">Contact Number</th>
-                      <th className="px-5 py-3.5">Designation / Role</th>
-                      <th className="px-5 py-3.5">Registered On</th>
-                      <th className="px-5 py-3.5 text-right">Poster Badge</th>
+                      <th className="px-4 py-3.5">Full Name</th>
+                      <th className="px-4 py-3.5">Contact Number</th>
+                      <th className="px-4 py-3.5">Designation / Role</th>
+                      <th className="px-4 py-3.5">Poster Folder</th>
+                      <th className="px-4 py-3.5 text-center">Downloads</th>
+                      <th className="px-4 py-3.5">Registered On</th>
+                      <th className="px-4 py-3.5 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
                     {loading ? (
                       <tr>
-                        <td colSpan={5} className="px-5 py-16 text-center">
+                        <td colSpan={7} className="px-5 py-16 text-center">
                           <DottedLoader size="lg" color="#DEA303" label="Loading attendee records..." />
                         </td>
                       </tr>
                     ) : filteredAttendees.length > 0 ? (
                       filteredAttendees.map((att) => (
                         <tr key={att.id} className="hover:bg-slate-800/40 transition">
-                          <td className="px-5 py-3.5 font-semibold text-white">
+                          <td className="px-4 py-3.5 font-semibold text-white">
                             {att.fullName}
                           </td>
-                          <td className="px-5 py-3.5 font-mono text-xs text-slate-300">
-                            {att.contact}
+                          <td className="px-4 py-3.5 font-mono text-xs text-slate-300">
+                            {att.contact ? (
+                              <a 
+                                href={`tel:${att.contact}`} 
+                                className="text-slate-300 hover:text-amber-300 transition flex items-center gap-1"
+                              >
+                                <Phone size={11} className="text-slate-500" />
+                                {att.contact}
+                              </a>
+                            ) : (
+                              <span className="text-slate-600">—</span>
+                            )}
                           </td>
-                          <td className="px-5 py-3.5">
-                            <span className="inline-block bg-slate-800 text-slate-200 border border-slate-700 text-xs px-2.5 py-0.5 rounded-full">
+                          <td className="px-4 py-3.5">
+                            <span className="inline-block bg-slate-800 text-slate-200 border border-slate-700 text-[11px] px-2.5 py-0.5 rounded-full">
                               {att.role === 'Other' && att.otherRole
                                 ? `Other: ${att.otherRole}`
                                 : att.role}
                             </span>
                           </td>
-                          <td className="px-5 py-3.5 text-xs text-slate-400 whitespace-nowrap">
+                          <td className="px-4 py-3.5">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 text-[11px]">
+                              <Folder size={10} />
+                              <span className="truncate max-w-[140px]">{att.posterTemplateName || '20th Anniversary'}</span>
+                            </span>
+                          </td>
+                          <td className="px-4 py-3.5 text-center whitespace-nowrap">
+                            <span 
+                              className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 font-bold text-[11px]"
+                              title={`Last downloaded: ${att.lastDownloadedAt ? new Date(att.lastDownloadedAt).toLocaleString() : 'N/A'}`}
+                            >
+                              <Sparkles size={10} />
+                              {typeof att.downloadCount === 'number' ? att.downloadCount : 1}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3.5 text-xs text-slate-400 whitespace-nowrap">
                             {new Date(att.createdAt).toLocaleDateString(undefined, {
                               month: 'short',
                               day: 'numeric',
                               year: 'numeric'
                             })}
                           </td>
-                          <td className="px-5 py-3.5 text-right whitespace-nowrap">
-                            {att.posterUrl ? (
+                          <td className="px-4 py-3.5 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5 justify-end">
+                              {att.posterUrl ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewPoster({ url: att.posterUrl!, name: att.fullName })}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs text-amber-300 rounded-lg transition border border-slate-700 font-medium cursor-pointer"
+                                  title="View Generated Poster"
+                                >
+                                  <Eye size={12} /> View
+                                </button>
+                              ) : (
+                                <span className="text-[11px] text-slate-600 mr-2">No Image</span>
+                              )}
+
                               <button
-                                onClick={() => setPreviewPoster({ url: att.posterUrl!, name: att.fullName })}
-                                className="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-xs text-amber-300 rounded-lg transition border border-slate-700 font-medium cursor-pointer"
+                                type="button"
+                                onClick={() => setAttendeeToDelete(att)}
+                                className="p-1 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition cursor-pointer"
+                                title="Remove attendee record"
                               >
-                                <Eye size={12} /> View Poster
+                                <Trash2 size={13} />
                               </button>
-                            ) : (
-                              <span className="text-xs text-slate-600">—</span>
-                            )}
+                            </div>
                           </td>
                         </tr>
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={5} className="px-5 py-12 text-center text-slate-500">
-                          No attendees match the specified criteria.
+                        <td colSpan={7} className="px-5 py-12 text-center text-slate-500">
+                          No attendees found in {currentFolderName}.
                         </td>
                       </tr>
                     )}
@@ -1786,6 +2003,68 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
               >
                 <Check size={14} />
                 <span>Save Product Details</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Attendee Delete Confirmation Modal */}
+      {attendeeToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 text-left shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl">
+                <Trash2 size={22} />
+              </div>
+              <div>
+                <h4 className="font-bold text-white text-base">Remove Attendee Record</h4>
+                <p className="text-xs text-slate-400">This will remove this attendee from attendance logs.</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-1.5 text-xs mb-5">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Name:</span>
+                <span className="text-white font-semibold">{attendeeToDelete.fullName}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Contact:</span>
+                <span className="text-slate-200 font-mono">{attendeeToDelete.contact || 'None'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Role / Folder:</span>
+                <span className="text-amber-400">{attendeeToDelete.role} • {attendeeToDelete.posterTemplateName || '20th Anniversary'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Total Downloads:</span>
+                <span className="text-emerald-400 font-bold">{attendeeToDelete.downloadCount || 1}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setAttendeeToDelete(null)}
+                disabled={isDeletingAttendee}
+                className="px-4 py-2 rounded-xl border border-slate-700 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteAttendee}
+                disabled={isDeletingAttendee}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow transition cursor-pointer flex items-center gap-1.5"
+              >
+                {isDeletingAttendee ? (
+                  <DottedLoader size="sm" color="#ffffff" />
+                ) : (
+                  <>
+                    <Trash2 size={13} />
+                    <span>Confirm Delete</span>
+                  </>
+                )}
               </button>
             </div>
           </div>

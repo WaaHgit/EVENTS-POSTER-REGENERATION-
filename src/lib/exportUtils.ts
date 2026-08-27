@@ -7,6 +7,9 @@ export interface ExportAttendeeItem {
   contact: string;
   role: string;
   otherRole?: string;
+  posterTemplateName?: string;
+  downloadCount?: number;
+  lastDownloadedAt?: string;
   createdAt: string;
   posterUrl?: string;
 }
@@ -24,10 +27,12 @@ export function exportToExcel(
     '#': index + 1,
     'Full Name': item.fullName,
     'Contact': item.contact,
-    'Role / Status': item.role,
-    'Other Specification': item.otherRole || '',
-    'Registration Date': new Date(item.createdAt).toLocaleString(),
-    'Poster URL': item.posterUrl ? 'Available' : 'N/A'
+    'Role / Status': item.otherRole && item.role === 'Other' ? `Other: ${item.otherRole}` : item.role,
+    'Event / Poster Folder': item.posterTemplateName || eventName,
+    'Downloads': typeof item.downloadCount === 'number' ? item.downloadCount : 1,
+    'First Registered': new Date(item.createdAt).toLocaleString(),
+    'Last Downloaded': item.lastDownloadedAt ? new Date(item.lastDownloadedAt).toLocaleString() : new Date(item.createdAt).toLocaleString(),
+    'Poster Badge': item.posterUrl ? 'Generated' : 'Pending'
   }));
 
   const worksheet = XLSX.utils.json_to_sheet(data);
@@ -38,9 +43,11 @@ export function exportToExcel(
     { wch: 25 },  // Full Name
     { wch: 20 },  // Contact
     { wch: 25 },  // Role
-    { wch: 22 },  // Other Specification
-    { wch: 24 },  // Registration Date
-    { wch: 15 }   // Poster URL
+    { wch: 30 },  // Event / Poster Folder
+    { wch: 12 },  // Downloads
+    { wch: 22 },  // First Registered
+    { wch: 22 },  // Last Downloaded
+    { wch: 15 }   // Poster Badge
   ];
 
   const workbook = XLSX.utils.book_new();
@@ -76,11 +83,11 @@ export function exportToPDF(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(10);
   doc.setTextColor(100, 116, 139); // Slate 500
-  doc.text('Attendee Registration Report', 14, 24);
+  doc.text('Attendee Registration & Download Directory', 14, 24);
 
   const exportDate = new Date().toLocaleString();
   doc.text(`Generated: ${exportDate}`, 14, 30);
-  doc.text(`Total Attendees: ${attendees.length}`, 140, 30);
+  doc.text(`Total Records: ${attendees.length}`, 140, 30);
 
   // Divider line
   doc.setDrawColor(226, 232, 240);
@@ -92,7 +99,8 @@ export function exportToPDF(
     String(index + 1),
     item.fullName,
     item.contact,
-    item.role,
+    item.otherRole && item.role === 'Other' ? `Other: ${item.otherRole}` : item.role,
+    String(typeof item.downloadCount === 'number' ? item.downloadCount : 1),
     new Date(item.createdAt).toLocaleDateString(undefined, {
       month: 'short',
       day: 'numeric',
@@ -102,7 +110,7 @@ export function exportToPDF(
 
   autoTable(doc, {
     startY: 38,
-    head: [['#', 'Full Name', 'Contact', 'Role', 'Date']],
+    head: [['#', 'Full Name', 'Contact', 'Role', 'Downloads', 'Date']],
     body: tableData,
     theme: 'grid',
     headStyles: {
@@ -120,11 +128,12 @@ export function exportToPDF(
       fillColor: [248, 250, 252]
     },
     columnStyles: {
-      0: { cellWidth: 10, halign: 'center' },
-      1: { cellWidth: 55 },
-      2: { cellWidth: 45 },
-      3: { cellWidth: 50 },
-      4: { cellWidth: 26 }
+      0: { cellWidth: 8, halign: 'center' },
+      1: { cellWidth: 50 },
+      2: { cellWidth: 40 },
+      3: { cellWidth: 45 },
+      4: { cellWidth: 20, halign: 'center' },
+      5: { cellWidth: 23 }
     },
     margin: { left: 14, right: 14 }
   });
