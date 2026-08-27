@@ -1,0 +1,6 @@
+{
+  "name": "UTQ Anniversary Poster Generator",
+  "description": "Create personalized attendance posters for the UTQ Youth Network 20th Anniversary celebration with instant photo cropping and high-resolution export.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
