@@ -236,29 +236,13 @@ export default function App() {
 
       setFinalPosterUrl(highResDataUrl);
 
-      // 2. Persist registration record
+      // 2. Persist registration record via Server API (persisted to Supabase)
       const cleanedContact = normalizeContact(formData.contact);
       const selectedRole = formData.status === 'Other' ? formData.otherStatus.trim() : formData.status;
 
-      if (isSupabaseConfigured && supabase) {
-        try {
-          await supabase.from('attendees').upsert({
-            full_name: formData.fullName.trim(),
-            contact: cleanedContact,
-            role: selectedRole,
-            other_role: formData.status === 'Other' ? formData.otherStatus.trim() : null,
-            poster_url: highResDataUrl,
-            poster_template_id: activeTemplate.id,
-            updated_at: new Date().toISOString()
-          }, { onConflict: 'contact' });
-        } catch (dbErr) {
-          console.warn('Supabase sync note:', dbErr);
-        }
-      }
-
-      // Local & Server API storage sync
       saveLocalSubmission({
         id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+        posterId: activeTemplate.id,
         fullName: formData.fullName.trim(),
         contact: formData.contact.trim(),
         contactNormalized: cleanedContact,
