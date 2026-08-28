@@ -8,13 +8,15 @@ import {
   AlertCircle,
   Crop,
   Shield,
-  HeartHandshake
+  HeartHandshake,
+  Sparkles
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { AttendeeForm, type FormData } from './components/AttendeeForm';
 import { PhotoEditor } from './components/PhotoEditor';
 import { AdminDashboard } from './components/AdminDashboard';
 import { MerchandiseShowcase } from './components/MerchandiseShowcase';
+import { PosterGenerationProgress } from './components/PosterGenerationProgress';
 import { 
   composePoster, 
   type CropArea, 
@@ -50,6 +52,8 @@ export default function App() {
 
   const [step, setStep] = useState<'form' | 'success'>('form');
   const [loading, setLoading] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState(0);
+  const [generationStageText, setGenerationStageText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [formData, setFormData] = useState<FormData>({ 
     fullName: '', 
@@ -220,8 +224,25 @@ export default function App() {
 
     setLoading(true);
     setError(null);
+    setGenerationProgress(15);
+    setGenerationStageText('Loading base official template...');
 
     try {
+      // Stage 1: Load base template and setup
+      await new Promise(r => setTimeout(r, 140));
+      setGenerationProgress(38);
+      setGenerationStageText('Processing & aligning high-res portrait...');
+
+      // Stage 2: Portrait processing & crop
+      await new Promise(r => setTimeout(r, 140));
+      setGenerationProgress(68);
+      setGenerationStageText('Styling attendee badge & gold typography...');
+
+      // Stage 3: Badge styling and typography
+      await new Promise(r => setTimeout(r, 140));
+      setGenerationProgress(88);
+      setGenerationStageText('Synthesizing 1536×1536 HD artwork...');
+
       // 1. Generate full native resolution poster using active dynamic template
       const scale = activeTemplate.export_scale || 1;
       const highResDataUrl = await composePoster(
@@ -233,6 +254,10 @@ export default function App() {
         activeTemplate,
         scale
       );
+
+      setGenerationProgress(98);
+      setGenerationStageText('Finalizing official poster badge...');
+      await new Promise(r => setTimeout(r, 120));
 
       setFinalPosterUrl(highResDataUrl);
 
@@ -254,6 +279,9 @@ export default function App() {
         createdAt: new Date().toISOString()
       });
 
+      setGenerationProgress(100);
+      await new Promise(r => setTimeout(r, 100));
+
       // Celebration effect
       confetti({
         particleCount: 80,
@@ -269,6 +297,8 @@ export default function App() {
       setError('Failed to generate your poster. Please try again.');
     } finally {
       setLoading(false);
+      setGenerationProgress(0);
+      setGenerationStageText('');
     }
   };
 
@@ -382,6 +412,14 @@ export default function App() {
         />
       )}
 
+      {/* High-Resolution Poster Generation Progress & Indeterminate Spinner Overlay */}
+      <PosterGenerationProgress
+        isOpen={loading}
+        progress={generationProgress}
+        stageText={generationStageText}
+        posterName={activeTemplate?.name}
+      />
+
       {/* Main Container */}
       <main className="w-full max-w-5xl mx-auto">
         {step === 'form' ? (
@@ -488,20 +526,40 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Submit Button */}
+                {/* Submit Button with Live Progress Bar & Indeterminate Spinner */}
                 <button
                   id="btn-create-poster"
                   type="submit"
                   disabled={loading || isTemplateLoading}
-                  className="w-full bg-[#0B2776] hover:bg-[#12369c] text-white font-semibold py-3.5 px-6 rounded-xl transition shadow-sm flex items-center justify-center gap-2 disabled:opacity-50 text-base cursor-pointer"
+                  className="w-full relative overflow-hidden bg-[#0B2776] hover:bg-[#12369c] text-white font-semibold py-3.5 px-6 rounded-xl transition-all shadow-sm flex flex-col items-center justify-center gap-1.5 disabled:opacity-90 text-base cursor-pointer"
                 >
                   {loading ? (
-                    <div className="flex items-center gap-2">
-                      <DottedLoader size="sm" color="#FFFFFF" />
-                      <span>Generating Poster...</span>
+                    <div className="w-full space-y-1.5 py-0.5">
+                      <div className="flex items-center justify-between text-xs text-amber-300 font-medium">
+                        <span className="flex items-center gap-2 truncate">
+                          <DottedLoader size="sm" color="#DEA303" />
+                          <span className="truncate">{generationStageText || 'Rendering high-resolution poster...'}</span>
+                        </span>
+                        <span className="font-mono font-bold text-[#DEA303] shrink-0 ml-2">
+                          {generationProgress}%
+                        </span>
+                      </div>
+                      
+                      {/* Integrated Linear Progress Track */}
+                      <div className="w-full h-1.5 bg-black/40 rounded-full overflow-hidden border border-white/10">
+                        <div 
+                          className="h-full bg-gradient-to-r from-amber-400 via-[#DEA303] to-amber-300 transition-all duration-200 ease-out relative overflow-hidden"
+                          style={{ width: `${Math.max(5, generationProgress)}%` }}
+                        >
+                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent -translate-x-full animate-shimmer" />
+                        </div>
+                      </div>
                     </div>
                   ) : (
-                    <span>Create My Poster</span>
+                    <div className="flex items-center justify-center gap-2">
+                      <Sparkles size={18} className="text-[#DEA303]" />
+                      <span>Create My Poster</span>
+                    </div>
                   )}
                 </button>
               </form>

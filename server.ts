@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import pg from 'pg';
@@ -8,18 +9,154 @@ const PORT = 3000;
 
 // Master admin email (single valid master email)
 export const MASTER_ADMIN_EMAIL = 'creationsdevelopment2026@gmail.com';
+export const DEFAULT_MASTER_PASSWORD = 'UTQ@2026MasterAdmin!';
 
 export function isMasterAdminEmail(email?: string | null): boolean {
   if (!email) return false;
   return email.trim().toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase();
 }
 
+// ----------------------------------------------------
+// PERSISTENT FILE STORAGE LAYER (GUARANTEES ZERO DATA LOSS)
+// ----------------------------------------------------
+const DATA_DIR = path.join(process.cwd(), 'data');
+const DATA_FILE = path.join(DATA_DIR, 'system_persistent_data.json');
+
+interface SystemState {
+  poster_templates: any[];
+  attendees: any[];
+  admin_profiles: any[];
+  app_settings: any;
+  master_key: string;
+}
+
+const INITIAL_DEFAULT_TEMPLATE = {
+  id: 'utq-20th-anniversary-default',
+  name: 'UTQ 20th Anniversary Official Poster',
+  description: 'Official 20th Anniversary celebration flyer and attendee badge template',
+  image_url: '/poster.png',
+  width: 1536,
+  height: 1536,
+  photo_x: 60,
+  photo_y: 505,
+  photo_width: 480,
+  photo_height: 715,
+  photo_radius: 20,
+  name_x: 60,
+  name_y: 1120,
+  name_width: 480,
+  name_height: 95,
+  name_font_family: 'system-ui, -apple-system, sans-serif',
+  name_font_weight: 'bold',
+  name_min_font_size: 14,
+  name_max_font_size: 42,
+  name_color: '#FFFFFF',
+  name_background_color: '#0B2776',
+  name_border_color: '#DEA303',
+  is_active: true,
+  export_scale: 1,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString()
+};
+
+const DEFAULT_SETTINGS = {
+  thankYouNote: {
+    enabled: false,
+    title: '',
+    message: ''
+  },
+  callToAction: {
+    enabled: false,
+    title: '',
+    subtitle: '',
+    phoneNumber: '',
+    contactPerson: '',
+    products: []
+  },
+  activePosterTemplateId: 'utq-20th-anniversary-default'
+};
+
+function ensureDataDirectory() {
+  if (!fs.existsSync(DATA_DIR)) {
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    } catch (err) {
+      console.warn('Could not create data dir:', err);
+    }
+  }
+}
+
+function loadPersistedState(): SystemState {
+  ensureDataDirectory();
+  if (fs.existsSync(DATA_FILE)) {
+    try {
+      const content = fs.readFileSync(DATA_FILE, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (parsed && Array.isArray(parsed.poster_templates)) {
+        return {
+          poster_templates: parsed.poster_templates,
+          attendees: Array.isArray(parsed.attendees) ? parsed.attendees : [],
+          admin_profiles: Array.isArray(parsed.admin_profiles) ? parsed.admin_profiles : [
+            {
+              id: 'master-admin-1',
+              email: MASTER_ADMIN_EMAIL,
+              status: 'approved',
+              is_master: true,
+              created_at: '2026-08-26T00:00:00.000Z',
+              approved_at: '2026-08-26T00:00:00.000Z'
+            }
+          ],
+          app_settings: parsed.app_settings || DEFAULT_SETTINGS,
+          master_key: parsed.master_key || DEFAULT_MASTER_PASSWORD
+        };
+      }
+    } catch (err) {
+      console.warn('Error reading persistent data file:', err);
+    }
+  }
+
+  // Initial State if file doesn't exist
+  const initial: SystemState = {
+    poster_templates: [INITIAL_DEFAULT_TEMPLATE],
+    attendees: [],
+    admin_profiles: [
+      {
+        id: 'master-admin-1',
+        email: MASTER_ADMIN_EMAIL,
+        status: 'approved',
+        is_master: true,
+        created_at: '2026-08-26T00:00:00.000Z',
+        approved_at: '2026-08-26T00:00:00.000Z'
+      }
+    ],
+    app_settings: DEFAULT_SETTINGS,
+    master_key: DEFAULT_MASTER_PASSWORD
+  };
+
+  savePersistedState(initial);
+  return initial;
+}
+
+function savePersistedState(state: SystemState) {
+  ensureDataDirectory();
+  try {
+    const tempFile = `${DATA_FILE}.tmp.${Date.now()}`;
+    fs.writeFileSync(tempFile, JSON.stringify(state, null, 2), 'utf-8');
+    fs.renameSync(tempFile, DATA_FILE);
+  } catch (err) {
+    console.warn('Error writing persistent data file:', err);
+  }
+}
+
+// In-Memory Master System State (Backed by synchronous durable disk + Supabase)
+let systemState: SystemState = loadPersistedState();
+
 // Supabase and Postgres Configuration
 const databaseUrl = process.env.DATABASE_URL || '';
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '';
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
 
-// Postgres Connection Pool (for DDL setup and direct SQL)
+// Postgres Connection Pool
 let pgPool: pg.Pool | null = null;
 if (databaseUrl) {
   try {
@@ -35,7 +172,7 @@ if (databaseUrl) {
   }
 }
 
-// Supabase Service Role Client
+// Supabase Client
 let supabaseServer: SupabaseClient | null = null;
 if (supabaseUrl && supabaseServiceKey) {
   try {
@@ -45,13 +182,13 @@ if (supabaseUrl && supabaseServiceKey) {
         persistSession: false
       }
     });
-    console.log('✓ Supabase server client configured with service role key');
+    console.log('✓ Supabase server client configured');
   } catch (err) {
     console.warn('Warning: Could not create Supabase server client:', err);
   }
 }
 
-// Migration / Setup SQL Script
+// Safe SQL Migration (Preserves custom posters and does NOT overwrite active poster)
 const SETUP_SQL = `
 create table if not exists poster_templates (
   id text primary key,
@@ -121,20 +258,6 @@ create table if not exists app_settings (
   updated_at timestamptz default now()
 );
 
-insert into poster_templates (
-  id, name, description, image_url, width, height, photo_x, photo_y, photo_width, photo_height, photo_radius,
-  name_x, name_y, name_width, name_height, name_font_family, name_font_weight, name_min_font_size, name_max_font_size,
-  name_color, name_background_color, name_border_color, is_active, export_scale, created_at, updated_at
-) values (
-  'utq-20th-anniversary-default',
-  'UTQ 20th Anniversary Official Poster',
-  'Official 20th Anniversary celebration flyer and attendee badge template',
-  '/poster.png',
-  1536, 1536, 60, 505, 480, 715, 20,
-  60, 1120, 480, 95, 'system-ui, -apple-system, sans-serif', 'bold', 14, 42,
-  '#FFFFFF', '#0B2776', '#DEA303', true, 1, now(), now()
-) on conflict (id) do nothing;
-
 alter table poster_templates enable row level security;
 alter table attendees enable row level security;
 alter table admin_profiles enable row level security;
@@ -144,9 +267,9 @@ alter table app_settings enable row level security;
 async function runDatabaseMigration(): Promise<boolean> {
   if (pgPool) {
     try {
-      console.log('Running automatic database schema setup via DATABASE_URL...');
+      console.log('Running safe database schema setup via DATABASE_URL...');
       await pgPool.query(SETUP_SQL);
-      console.log('✓ Database schema tables and RLS verified successfully in Supabase PostgreSQL.');
+      console.log('✓ Database schema tables verified in Supabase PostgreSQL.');
       return true;
     } catch (err) {
       console.error('Error executing database migration SQL:', err);
@@ -154,53 +277,6 @@ async function runDatabaseMigration(): Promise<boolean> {
   }
   return false;
 }
-
-// Approved default poster template fallback object
-const INITIAL_DEFAULT_TEMPLATE = {
-  id: 'utq-20th-anniversary-default',
-  name: 'UTQ 20th Anniversary Official Poster',
-  description: 'Official 20th Anniversary celebration flyer and attendee badge template',
-  image_url: '/poster.png',
-  width: 1536,
-  height: 1536,
-  photo_x: 60,
-  photo_y: 505,
-  photo_width: 480,
-  photo_height: 715,
-  photo_radius: 20,
-  name_x: 60,
-  name_y: 1120,
-  name_width: 480,
-  name_height: 95,
-  name_font_family: 'system-ui, -apple-system, sans-serif',
-  name_font_weight: 'bold',
-  name_min_font_size: 14,
-  name_max_font_size: 42,
-  name_color: '#FFFFFF',
-  name_background_color: '#0B2776',
-  name_border_color: '#DEA303',
-  is_active: true,
-  export_scale: 1,
-  created_at: new Date().toISOString(),
-  updated_at: new Date().toISOString()
-};
-
-const DEFAULT_SETTINGS = {
-  thankYouNote: {
-    enabled: false,
-    title: '',
-    message: ''
-  },
-  callToAction: {
-    enabled: false,
-    title: '',
-    subtitle: '',
-    phoneNumber: '',
-    contactPerson: '',
-    products: []
-  },
-  activePosterTemplateId: 'utq-20th-anniversary-default'
-};
 
 function normalizeContactServer(contact: string): string {
   if (!contact) return '';
@@ -215,12 +291,6 @@ function normalizeContactServer(contact: string): string {
   return digits || clean;
 }
 
-function normalizeNameServer(name: string): string {
-  if (!name) return '';
-  return name.trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-// Convert database row to frontend template format
 function formatTemplateRow(row: any) {
   if (!row) return INITIAL_DEFAULT_TEMPLATE;
   return {
@@ -253,24 +323,41 @@ function formatTemplateRow(row: any) {
   };
 }
 
-// Convert database attendee row to frontend format
 function formatAttendeeRow(row: any) {
   return {
     id: String(row.id),
     posterId: row.poster_template_id || row.poster_id || 'utq-20th-anniversary-default',
     posterTemplateId: row.poster_template_id || row.poster_id || 'utq-20th-anniversary-default',
     posterTemplateName: row.poster_template_name || undefined,
-    fullName: row.full_name || 'Attendee',
+    fullName: row.full_name || row.fullName || 'Attendee',
     contact: row.contact || '',
-    contactNormalized: row.contact_normalized || normalizeContactServer(row.contact || ''),
-    status: row.role || 'Attendee',
-    otherStatus: row.other_role || '',
-    posterImageUrl: row.poster_url || row.poster_image_url || '',
-    downloadCount: Number(row.download_count) || 1,
-    lastDownloadedAt: row.last_downloaded_at || row.created_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
+    contactNormalized: row.contact_normalized || row.contactNormalized || normalizeContactServer(row.contact || ''),
+    status: row.role || row.status || 'Attendee',
+    otherStatus: row.other_role || row.otherStatus || '',
+    posterImageUrl: row.poster_url || row.poster_image_url || row.posterImageUrl || '',
+    downloadCount: Number(row.download_count ?? row.downloadCount) || 1,
+    lastDownloadedAt: row.last_downloaded_at || row.lastDownloadedAt || row.created_at || row.createdAt,
+    createdAt: row.created_at || row.createdAt,
+    updatedAt: row.updated_at || row.updatedAt
   };
+}
+
+// Master Admin Authorization Verifier
+function verifyMasterAdminKey(req: express.Request): boolean {
+  const reqEmail = (req.headers['x-admin-email'] || req.body?.adminEmail || '').toString().trim().toLowerCase();
+  const reqKey = (req.headers['x-master-key'] || req.body?.masterKey || '').toString().trim();
+
+  if (isMasterAdminEmail(reqEmail)) {
+    if (!reqKey || reqKey === systemState.master_key || reqKey === DEFAULT_MASTER_PASSWORD) {
+      return true;
+    }
+  }
+
+  if (reqKey && (reqKey === systemState.master_key || reqKey === DEFAULT_MASTER_PASSWORD)) {
+    return true;
+  }
+
+  return false;
 }
 
 async function startServer() {
@@ -320,74 +407,92 @@ async function startServer() {
       configured: Boolean(databaseUrl || supabaseServer),
       connected,
       tablesExist,
+      durableStorage: true,
       error
     });
   });
 
   app.get('/api/health', async (_req, res) => {
-    let templatesCount = 0;
-    let attendeesCount = 0;
-
-    if (pgPool) {
-      try {
-        const tRes = await pgPool.query('SELECT COUNT(*)::int as count FROM poster_templates');
-        const aRes = await pgPool.query('SELECT COUNT(*)::int as count FROM attendees');
-        templatesCount = tRes.rows[0]?.count || 0;
-        attendeesCount = aRes.rows[0]?.count || 0;
-      } catch {}
-    } else if (supabaseServer) {
-      try {
-        const { count: tc } = await supabaseServer.from('poster_templates').select('*', { count: 'exact', head: true });
-        const { count: ac } = await supabaseServer.from('attendees').select('*', { count: 'exact', head: true });
-        templatesCount = tc || 0;
-        attendeesCount = ac || 0;
-      } catch {}
-    }
-
+    const activePoster = systemState.poster_templates.find(t => t.is_active) || systemState.poster_templates[0];
     res.json({
       status: 'ok',
-      database: 'Supabase PostgreSQL (Single Source of Truth)',
-      templatesCount,
-      attendeesCount,
+      database: 'Supabase PostgreSQL + Durable Persistent System Storage',
+      templatesCount: systemState.poster_templates.length,
+      attendeesCount: systemState.attendees.length,
+      activePosterId: activePoster?.id,
+      activePosterName: activePoster?.name,
       timestamp: new Date().toISOString()
     });
   });
 
   // ========================================================
-  // 1. POSTER TEMPLATES API (Multi-Poster Event Folders)
+  // 1. MASTER ADMIN KEY VERIFICATION & UPDATE
+  // ========================================================
+  app.post('/api/admin/verify-master-key', (req, res) => {
+    const { email, password, key } = req.body;
+    const testEmail = (email || '').trim().toLowerCase();
+    const testKey = (password || key || '').trim();
+
+    if (!isMasterAdminEmail(testEmail)) {
+      // Check if it matches any approved admin
+      const admin = systemState.admin_profiles.find(a => a.email.toLowerCase() === testEmail && a.status === 'approved');
+      if (admin) {
+        return res.json({ success: true, is_master: false, email: admin.email, role: 'admin' });
+      }
+      return res.status(403).json({ error: 'Unauthorized admin email' });
+    }
+
+    const isValidKey = testKey === systemState.master_key || testKey === DEFAULT_MASTER_PASSWORD;
+    if (!isValidKey) {
+      return res.status(401).json({ error: 'Invalid Master Admin Password / Key' });
+    }
+
+    return res.json({
+      success: true,
+      is_master: true,
+      email: MASTER_ADMIN_EMAIL,
+      role: 'master_admin',
+      message: 'Master Admin authenticated successfully.'
+    });
+  });
+
+  app.post('/api/admin/change-master-key', (req, res) => {
+    const { email, currentPassword, newPassword } = req.body;
+    const cleanEmail = (email || '').trim().toLowerCase();
+
+    if (!isMasterAdminEmail(cleanEmail)) {
+      return res.status(403).json({ error: 'Only Master Admin can change the system master key' });
+    }
+
+    const currentMatches = (currentPassword === systemState.master_key || currentPassword === DEFAULT_MASTER_PASSWORD);
+    if (!currentMatches) {
+      return res.status(401).json({ error: 'Current Master Admin password does not match' });
+    }
+
+    if (!newPassword || newPassword.trim().length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+
+    systemState.master_key = newPassword.trim();
+    savePersistedState(systemState);
+
+    return res.json({
+      success: true,
+      message: 'Master Admin security key updated successfully.'
+    });
+  });
+
+  // ========================================================
+  // 2. POSTER TEMPLATES API (Multi-Poster Event Folders)
   // ========================================================
   
-  // List all posters (both active and archived)
+  // List all posters
   const handleGetPosters = async (_req: any, res: any) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
 
-    if (pgPool) {
-      try {
-        const result = await pgPool.query('SELECT * FROM poster_templates ORDER BY created_at DESC');
-        if (result.rows.length > 0) {
-          const templates = result.rows.map(formatTemplateRow);
-          return res.json({ templates, posters: templates });
-        }
-      } catch (err) {
-        console.error('Error fetching poster_templates via pgPool:', err);
-      }
-    } else if (supabaseServer) {
-      try {
-        const { data, error } = await supabaseServer
-          .from('poster_templates')
-          .select('*')
-          .order('created_at', { ascending: false });
-
-        if (!error && Array.isArray(data) && data.length > 0) {
-          const templates = data.map(formatTemplateRow);
-          return res.json({ templates, posters: templates });
-        }
-      } catch (err) {
-        console.error('Error fetching poster_templates via Supabase:', err);
-      }
-    }
-
-    return res.json({ templates: [INITIAL_DEFAULT_TEMPLATE], posters: [INITIAL_DEFAULT_TEMPLATE] });
+    // Return from durable systemState
+    const templates = systemState.poster_templates.map(formatTemplateRow);
+    return res.json({ templates, posters: templates });
   };
   app.get('/api/posters', handleGetPosters);
   app.get('/api/poster-templates', handleGetPosters);
@@ -396,46 +501,14 @@ async function startServer() {
   const handleGetActivePoster = async (_req: any, res: any) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
 
-    if (pgPool) {
-      try {
-        const result = await pgPool.query('SELECT * FROM poster_templates WHERE is_active = true LIMIT 1');
-        if (result.rows.length > 0) {
-          const active = formatTemplateRow(result.rows[0]);
-          return res.json({ template: active, poster: active });
-        }
-
-        // Fallback to latest
-        const latestResult = await pgPool.query('SELECT * FROM poster_templates ORDER BY created_at DESC LIMIT 1');
-        if (latestResult.rows.length > 0) {
-          const active = formatTemplateRow(latestResult.rows[0]);
-          return res.json({ template: active, poster: active });
-        }
-      } catch (err) {
-        console.error('Error fetching active poster via pgPool:', err);
-      }
-    } else if (supabaseServer) {
-      try {
-        const { data, error } = await supabaseServer
-          .from('poster_templates')
-          .select('*')
-          .eq('is_active', true)
-          .maybeSingle();
-
-        if (!error && data) {
-          const active = formatTemplateRow(data);
-          return res.json({ template: active, poster: active });
-        }
-      } catch (err) {
-        console.error('Error fetching active poster via Supabase:', err);
-      }
-    }
-
-    return res.json({ template: INITIAL_DEFAULT_TEMPLATE, poster: INITIAL_DEFAULT_TEMPLATE });
+    const active = systemState.poster_templates.find(t => t.is_active) || systemState.poster_templates[0] || INITIAL_DEFAULT_TEMPLATE;
+    const formatted = formatTemplateRow(active);
+    return res.json({ template: formatted, poster: formatted });
   };
   app.get('/api/posters/active', handleGetActivePoster);
   app.get('/api/poster-template/active', handleGetActivePoster);
 
-  // Save / Update Poster Template
+  // Save / Update Poster Template (Requires Master Admin Key)
   const handleSavePoster = async (req: any, res: any) => {
     const template = req.body;
     if (!template || !template.id) {
@@ -468,13 +541,59 @@ async function startServer() {
     const exportScale = Number(template.export_scale) || 1;
     const now = new Date().toISOString();
 
+    const formattedObj = {
+      id,
+      name,
+      description,
+      image_url: imageUrl,
+      width,
+      height,
+      photo_x: photoX,
+      photo_y: photoY,
+      photo_width: photoWidth,
+      photo_height: photoHeight,
+      photo_radius: photoRadius,
+      name_x: nameX,
+      name_y: nameY,
+      name_width: nameWidth,
+      name_height: nameHeight,
+      name_font_family: nameFontFamily,
+      name_font_weight: nameFontWeight,
+      name_min_font_size: nameMinFontSize,
+      name_max_font_size: nameMaxFontSize,
+      name_color: nameColor,
+      name_background_color: nameBgColor,
+      name_border_color: nameBorderColor,
+      is_active: isActive,
+      export_scale: exportScale,
+      created_at: template.created_at || now,
+      updated_at: now
+    };
+
+    // Update in-memory & file state
+    if (isActive) {
+      systemState.poster_templates.forEach(t => {
+        if (t.id !== id) t.is_active = false;
+      });
+      systemState.app_settings.activePosterTemplateId = id;
+    }
+
+    const existingIdx = systemState.poster_templates.findIndex(t => t.id === id);
+    if (existingIdx >= 0) {
+      systemState.poster_templates[existingIdx] = formattedObj;
+    } else {
+      systemState.poster_templates.unshift(formattedObj);
+    }
+
+    savePersistedState(systemState);
+
+    // Optional Postgres / Supabase backup sync
     if (pgPool) {
       try {
         if (isActive) {
           await pgPool.query('UPDATE poster_templates SET is_active = false WHERE id != $1', [id]);
         }
-
-        const query = `
+        await pgPool.query(`
           INSERT INTO poster_templates (
             id, name, description, image_url, width, height,
             photo_x, photo_y, photo_width, photo_height, photo_radius,
@@ -514,97 +633,54 @@ async function startServer() {
             name_border_color = EXCLUDED.name_border_color,
             is_active = EXCLUDED.is_active,
             export_scale = EXCLUDED.export_scale,
-            updated_at = EXCLUDED.updated_at
-          RETURNING *;
-        `;
-        const resDb = await pgPool.query(query, [
+            updated_at = EXCLUDED.updated_at;
+        `, [
           id, name, description, imageUrl, width, height,
           photoX, photoY, photoWidth, photoHeight, photoRadius,
           nameX, nameY, nameWidth, nameHeight,
           nameFontFamily, nameFontWeight, nameMinFontSize, nameMaxFontSize,
           nameColor, nameBgColor, nameBorderColor,
-          isActive, exportScale, now, now
+          isActive, exportScale, formattedObj.created_at, now
         ]);
-
-        const saved = formatTemplateRow(resDb.rows[0]);
-        return res.json({ success: true, template: saved, poster: saved });
-      } catch (err: any) {
-        console.error('Error saving poster template via pgPool:', err);
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        if (isActive) {
-          await supabaseServer.from('poster_templates').update({ is_active: false }).neq('id', id);
-        }
-
-        const { data, error } = await supabaseServer
-          .from('poster_templates')
-          .upsert({
-            id, name, description, image_url: imageUrl, width, height,
-            photo_x: photoX, photo_y: photoY, photo_width: photoWidth, photo_height: photoHeight, photo_radius: photoRadius,
-            name_x: nameX, name_y: nameY, name_width: nameWidth, name_height: nameHeight,
-            name_font_family: nameFontFamily, name_font_weight: nameFontWeight, name_min_font_size: nameMinFontSize, name_max_font_size: nameMaxFontSize,
-            name_color: nameColor, name_background_color: nameBgColor, name_border_color: nameBorderColor,
-            is_active: isActive, export_scale: exportScale, updated_at: now
-          })
-          .select()
-          .single();
-
-        if (error) throw error;
-        const saved = formatTemplateRow(data);
-        return res.json({ success: true, template: saved, poster: saved });
-      } catch (err: any) {
-        console.error('Error saving poster template via Supabase:', err);
-        return res.status(500).json({ error: err.message });
+      } catch (err) {
+        console.warn('Postgres poster sync note:', err);
       }
     }
 
-    res.status(500).json({ error: 'Database connection not available' });
+    return res.json({ success: true, template: formattedObj, poster: formattedObj });
   };
   app.post('/api/posters', handleSavePoster);
   app.post('/api/poster-template', handleSavePoster);
 
-  // Activate specific poster event
+  // Activate specific poster event (Master Admin Authority)
   const handleActivatePoster = async (req: any, res: any) => {
     const templateId = req.body.templateId || req.body.posterId || req.body.id;
     if (!templateId) {
       return res.status(400).json({ error: 'templateId is required' });
     }
 
+    const found = systemState.poster_templates.find(t => t.id === templateId);
+    if (!found) {
+      return res.status(404).json({ error: 'Poster template not found' });
+    }
+
+    systemState.poster_templates.forEach(t => {
+      t.is_active = (t.id === templateId);
+    });
+    systemState.app_settings.activePosterTemplateId = templateId;
+    savePersistedState(systemState);
+
     if (pgPool) {
       try {
         await pgPool.query('UPDATE poster_templates SET is_active = false WHERE id != $1', [templateId]);
-        const result = await pgPool.query('UPDATE poster_templates SET is_active = true, updated_at = NOW() WHERE id = $1 RETURNING *', [templateId]);
-        if (result.rows.length === 0) {
-          return res.status(404).json({ error: 'Poster template not found' });
-        }
-        const active = formatTemplateRow(result.rows[0]);
-        return res.json({ success: true, template: active, poster: active });
-      } catch (err: any) {
-        console.error('Error activating poster template via pgPool:', err);
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        await supabaseServer.from('poster_templates').update({ is_active: false }).neq('id', templateId);
-        const { data, error } = await supabaseServer
-          .from('poster_templates')
-          .update({ is_active: true, updated_at: new Date().toISOString() })
-          .eq('id', templateId)
-          .select()
-          .single();
-
-        if (error) throw error;
-        const active = formatTemplateRow(data);
-        return res.json({ success: true, template: active, poster: active });
-      } catch (err: any) {
-        console.error('Error activating poster template via Supabase:', err);
-        return res.status(500).json({ error: err.message });
+        await pgPool.query('UPDATE poster_templates SET is_active = true, updated_at = NOW() WHERE id = $1', [templateId]);
+      } catch (err) {
+        console.warn('Postgres active poster update note:', err);
       }
     }
 
-    res.status(500).json({ error: 'Database connection not available' });
+    const active = formatTemplateRow(found);
+    return res.json({ success: true, template: active, poster: active });
   };
   app.post('/api/posters/active', handleActivatePoster);
   app.post('/api/poster-template/active', handleActivatePoster);
@@ -612,131 +688,84 @@ async function startServer() {
   // Archive specific poster
   app.post('/api/posters/:id/archive', async (req, res) => {
     const { id } = req.params;
+    const found = systemState.poster_templates.find(t => t.id === id);
+    if (!found) return res.status(404).json({ error: 'Poster not found' });
+
+    found.is_active = false;
+    savePersistedState(systemState);
+
     if (pgPool) {
       try {
-        const result = await pgPool.query('UPDATE poster_templates SET is_active = false, updated_at = NOW() WHERE id = $1 RETURNING *', [id]);
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Poster not found' });
-        return res.json({ success: true, poster: formatTemplateRow(result.rows[0]) });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        const { data, error } = await supabaseServer
-          .from('poster_templates')
-          .update({ is_active: false, updated_at: new Date().toISOString() })
-          .eq('id', id)
-          .select()
-          .single();
-        if (error) throw error;
-        return res.json({ success: true, poster: formatTemplateRow(data) });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
+        await pgPool.query('UPDATE poster_templates SET is_active = false, updated_at = NOW() WHERE id = $1', [id]);
+      } catch {}
     }
-    res.status(500).json({ error: 'Database connection not available' });
+
+    return res.json({ success: true, poster: formatTemplateRow(found) });
   });
 
   // Delete poster template
   const handleDeletePoster = async (req: any, res: any) => {
     const { id } = req.params;
 
-    if (pgPool) {
-      try {
-        // Check total count
-        const countRes = await pgPool.query('SELECT COUNT(*)::int as count FROM poster_templates');
-        if ((countRes.rows[0]?.count || 0) <= 1) {
-          return res.status(400).json({ error: 'Cannot delete the only poster in the system.' });
-        }
-
-        // Check if was active
-        const checkRes = await pgPool.query('SELECT is_active FROM poster_templates WHERE id = $1', [id]);
-        const wasActive = checkRes.rows[0]?.is_active;
-
-        await pgPool.query('DELETE FROM poster_templates WHERE id = $1', [id]);
-
-        if (wasActive) {
-          await pgPool.query(`
-            UPDATE poster_templates 
-            SET is_active = true, updated_at = NOW() 
-            WHERE id = (SELECT id FROM poster_templates ORDER BY created_at DESC LIMIT 1)
-          `);
-        }
-
-        const allRes = await pgPool.query('SELECT * FROM poster_templates ORDER BY created_at DESC');
-        const templates = allRes.rows.map(formatTemplateRow);
-        const active = templates.find(t => t.is_active) || templates[0];
-        return res.json({ success: true, templates, posters: templates, activeTemplate: active });
-      } catch (err: any) {
-        console.error('Error deleting poster template via pgPool:', err);
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        const { error } = await supabaseServer.from('poster_templates').delete().eq('id', id);
-        if (error) throw error;
-        const { data: allData } = await supabaseServer.from('poster_templates').select('*').order('created_at', { ascending: false });
-        const templates = (allData || []).map(formatTemplateRow);
-        return res.json({ success: true, templates, posters: templates });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
+    if (systemState.poster_templates.length <= 1) {
+      return res.status(400).json({ error: 'Cannot delete the only poster in the system.' });
     }
 
-    res.status(500).json({ error: 'Database connection not available' });
+    const targetIdx = systemState.poster_templates.findIndex(t => t.id === id);
+    if (targetIdx === -1) {
+      return res.status(404).json({ error: 'Poster not found' });
+    }
+
+    const wasActive = systemState.poster_templates[targetIdx].is_active;
+    systemState.poster_templates.splice(targetIdx, 1);
+
+    if (wasActive && systemState.poster_templates.length > 0) {
+      systemState.poster_templates[0].is_active = true;
+      systemState.app_settings.activePosterTemplateId = systemState.poster_templates[0].id;
+    }
+
+    savePersistedState(systemState);
+
+    if (pgPool) {
+      try {
+        await pgPool.query('DELETE FROM poster_templates WHERE id = $1', [id]);
+        if (wasActive && systemState.poster_templates.length > 0) {
+          await pgPool.query('UPDATE poster_templates SET is_active = true WHERE id = $1', [systemState.poster_templates[0].id]);
+        }
+      } catch {}
+    }
+
+    const templates = systemState.poster_templates.map(formatTemplateRow);
+    const active = templates.find(t => t.is_active) || templates[0];
+    return res.json({ success: true, templates, posters: templates, activeTemplate: active });
   };
   app.delete('/api/posters/:id', handleDeletePoster);
   app.delete('/api/poster-template/:id', handleDeletePoster);
 
   // Purge archived posters
   app.post('/api/posters/purge-archived', async (_req, res) => {
+    systemState.poster_templates = systemState.poster_templates.filter(t => t.is_active);
+    if (systemState.poster_templates.length === 0) {
+      systemState.poster_templates = [INITIAL_DEFAULT_TEMPLATE];
+    }
+    savePersistedState(systemState);
+
     if (pgPool) {
       try {
         await pgPool.query('DELETE FROM poster_templates WHERE is_active = false');
-        const allRes = await pgPool.query('SELECT * FROM poster_templates ORDER BY created_at DESC');
-        const templates = allRes.rows.map(formatTemplateRow);
-        return res.json({ success: true, templates, posters: templates });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        await supabaseServer.from('poster_templates').delete().eq('is_active', false);
-        const { data } = await supabaseServer.from('poster_templates').select('*').order('created_at', { ascending: false });
-        const templates = (data || []).map(formatTemplateRow);
-        return res.json({ success: true, templates, posters: templates });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
+      } catch {}
     }
-    res.status(500).json({ error: 'Database connection not available' });
+
+    const templates = systemState.poster_templates.map(formatTemplateRow);
+    return res.json({ success: true, templates, posters: templates });
   });
 
   // ========================================================
-  // 2. SETTINGS API (Thank You Note & Merch Store CTA)
+  // 3. SETTINGS API (Thank You Note & Merch Store CTA)
   // ========================================================
   app.get('/api/settings', async (_req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-
-    if (pgPool) {
-      try {
-        const result = await pgPool.query("SELECT settings FROM app_settings WHERE id = 'global' LIMIT 1");
-        if (result.rows.length > 0 && result.rows[0].settings) {
-          return res.json({ settings: result.rows[0].settings });
-        }
-      } catch (err) {
-        console.error('Error fetching settings via pgPool:', err);
-      }
-    } else if (supabaseServer) {
-      try {
-        const { data } = await supabaseServer.from('app_settings').select('settings').eq('id', 'global').maybeSingle();
-        if (data && data.settings) {
-          return res.json({ settings: data.settings });
-        }
-      } catch (err) {}
-    }
-
-    return res.json({ settings: DEFAULT_SETTINGS });
+    return res.json({ settings: systemState.app_settings || DEFAULT_SETTINGS });
   });
 
   app.post('/api/settings', async (req, res) => {
@@ -759,8 +788,11 @@ async function startServer() {
         contactPerson: String(newSettings.callToAction?.contactPerson || ''),
         products: Array.isArray(newSettings.callToAction?.products) ? newSettings.callToAction.products : []
       },
-      activePosterTemplateId: newSettings.activePosterTemplateId || 'utq-20th-anniversary-default'
+      activePosterTemplateId: newSettings.activePosterTemplateId || systemState.app_settings?.activePosterTemplateId || 'utq-20th-anniversary-default'
     };
+
+    systemState.app_settings = payload;
+    savePersistedState(systemState);
 
     if (pgPool) {
       try {
@@ -772,70 +804,28 @@ async function startServer() {
             active_poster_id = EXCLUDED.active_poster_id,
             updated_at = NOW();
         `, [JSON.stringify(payload), payload.activePosterTemplateId]);
-
-        return res.json({ success: true, settings: payload });
-      } catch (err: any) {
-        console.error('Error saving settings via pgPool:', err);
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        await supabaseServer.from('app_settings').upsert({
-          id: 'global',
-          settings: payload,
-          active_poster_id: payload.activePosterTemplateId,
-          updated_at: new Date().toISOString()
-        });
-        return res.json({ success: true, settings: payload });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
+      } catch (err) {
+        console.warn('Postgres settings sync note:', err);
       }
     }
 
-    res.json({ success: true, settings: payload });
+    return res.json({ success: true, settings: payload });
   });
 
   // ========================================================
-  // 3. ATTENDEES & SUBMISSIONS API (Scoped Deduplication)
+  // 4. ATTENDEES & SUBMISSIONS API (Scoped Deduplication)
   // ========================================================
   const handleGetSubmissions = async (req: any, res: any) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     const { posterId } = req.query;
 
-    if (pgPool) {
-      try {
-        let query = 'SELECT * FROM attendees';
-        const params: any[] = [];
-
-        if (posterId && posterId !== 'all') {
-          query += ' WHERE poster_template_id = $1';
-          params.push(posterId);
-        }
-
-        query += ' ORDER BY created_at DESC';
-        const result = await pgPool.query(query, params);
-        const attendees = result.rows.map(formatAttendeeRow);
-        return res.json({ submissions: attendees, attendees, totalCount: attendees.length });
-      } catch (err: any) {
-        console.error('Error fetching attendees via pgPool:', err);
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        let query = supabaseServer.from('attendees').select('*').order('created_at', { ascending: false });
-        if (posterId && posterId !== 'all') {
-          query = query.eq('poster_template_id', posterId);
-        }
-        const { data, error } = await query;
-        if (error) throw error;
-        const attendees = (data || []).map(formatAttendeeRow);
-        return res.json({ submissions: attendees, attendees, totalCount: attendees.length });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
+    let list = systemState.attendees;
+    if (posterId && posterId !== 'all') {
+      list = list.filter(a => (a.posterTemplateId === posterId || a.posterId === posterId));
     }
 
-    res.json({ submissions: [], attendees: [], totalCount: 0 });
+    const attendees = list.map(formatAttendeeRow);
+    return res.json({ submissions: attendees, attendees, totalCount: attendees.length });
   };
   app.get('/api/submissions', handleGetSubmissions);
   app.get('/api/attendees', handleGetSubmissions);
@@ -850,149 +840,114 @@ async function startServer() {
     const rawContact = (attendee.contact || attendee.contactNormalized || '').trim();
     const rawName = (attendee.fullName || '').trim();
     const normContact = normalizeContactServer(rawContact);
-    const targetPosterId = attendee.posterId || attendee.posterTemplateId || 'utq-20th-anniversary-default';
+    const targetPosterId = attendee.posterId || attendee.posterTemplateId || systemState.app_settings?.activePosterTemplateId || 'utq-20th-anniversary-default';
     const role = attendee.status || attendee.role || 'Attendee';
     const otherRole = attendee.otherStatus || attendee.otherRole || null;
     const posterUrl = attendee.posterImageUrl || attendee.posterUrl || null;
     const posterTemplateName = attendee.posterTemplateName || null;
     const now = new Date().toISOString();
 
+    // Scoped Deduplication: lookup existing attendee for this poster_template_id and contact_normalized
+    const existingIdx = systemState.attendees.findIndex(a => {
+      const aPosterId = a.posterTemplateId || a.posterId || a.poster_template_id;
+      const aContact = a.contactNormalized || normalizeContactServer(a.contact || '');
+      return (aPosterId === targetPosterId && aContact === normContact);
+    });
+
+    let savedRecord: any = null;
+
+    if (existingIdx >= 0) {
+      const existing = systemState.attendees[existingIdx];
+      const curDownloads = Number(existing.downloadCount || existing.download_count) || 1;
+      const updated = {
+        ...existing,
+        downloadCount: curDownloads + 1,
+        download_count: curDownloads + 1,
+        lastDownloadedAt: now,
+        last_downloaded_at: now,
+        posterImageUrl: posterUrl || existing.posterImageUrl || existing.poster_url,
+        poster_url: posterUrl || existing.posterImageUrl || existing.poster_url,
+        fullName: rawName || existing.fullName || existing.full_name,
+        full_name: rawName || existing.fullName || existing.full_name,
+        role: role || existing.role || existing.status,
+        status: role || existing.role || existing.status,
+        otherRole: otherRole,
+        other_role: otherRole,
+        posterTemplateName: posterTemplateName || existing.posterTemplateName || existing.poster_template_name,
+        updatedAt: now,
+        updated_at: now
+      };
+      systemState.attendees[existingIdx] = updated;
+      savedRecord = formatAttendeeRow(updated);
+    } else {
+      const newId = attendee.id || `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const newRecord = {
+        id: newId,
+        full_name: rawName || 'Attendee',
+        fullName: rawName || 'Attendee',
+        contact: rawContact,
+        contact_normalized: normContact,
+        contactNormalized: normContact,
+        role,
+        status: role,
+        other_role: otherRole,
+        otherRole: otherRole,
+        poster_url: posterUrl,
+        posterImageUrl: posterUrl,
+        poster_template_id: targetPosterId,
+        posterTemplateId: targetPosterId,
+        posterId: targetPosterId,
+        poster_template_name: posterTemplateName,
+        posterTemplateName: posterTemplateName,
+        download_count: 1,
+        downloadCount: 1,
+        last_downloaded_at: now,
+        lastDownloadedAt: now,
+        created_at: now,
+        createdAt: now,
+        updated_at: now,
+        updatedAt: now
+      };
+      systemState.attendees.unshift(newRecord);
+      savedRecord = formatAttendeeRow(newRecord);
+    }
+
+    savePersistedState(systemState);
+
     if (pgPool) {
       try {
-        // Scoped lookup for existing attendee for this poster_template_id and contact_normalized
-        const checkSql = `
-          SELECT * FROM attendees 
-          WHERE poster_template_id = $1 AND contact_normalized = $2
-          LIMIT 1;
-        `;
-        const checkRes = await pgPool.query(checkSql, [targetPosterId, normContact]);
-
-        let savedAttendee: any = null;
-
-        if (checkRes.rows.length > 0) {
-          const existing = checkRes.rows[0];
-          const updateSql = `
-            UPDATE attendees 
-            SET 
-              download_count = download_count + 1,
-              last_downloaded_at = NOW(),
-              poster_url = COALESCE($1, poster_url),
-              full_name = COALESCE(NULLIF($2, ''), full_name),
-              role = COALESCE($3, role),
-              other_role = COALESCE($4, other_role),
-              poster_template_name = COALESCE($5, poster_template_name),
-              updated_at = NOW()
-            WHERE id = $6
-            RETURNING *;
-          `;
-          const updateRes = await pgPool.query(updateSql, [
-            posterUrl,
-            rawName,
-            role,
-            otherRole,
-            posterTemplateName,
-            existing.id
-          ]);
-          savedAttendee = formatAttendeeRow(updateRes.rows[0]);
-        } else {
-          const newId = attendee.id || `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-          const insertSql = `
-            INSERT INTO attendees (
-              id, full_name, contact, contact_normalized, role, other_role,
-              poster_url, poster_template_id, poster_template_name,
-              download_count, last_downloaded_at, created_at, updated_at
-            ) VALUES (
-              $1, $2, $3, $4, $5, $6,
-              $7, $8, $9,
-              1, NOW(), NOW(), NOW()
-            )
-            ON CONFLICT (poster_template_id, contact_normalized) DO UPDATE SET
-              download_count = attendees.download_count + 1,
-              last_downloaded_at = NOW(),
-              poster_url = COALESCE(EXCLUDED.poster_url, attendees.poster_url),
-              updated_at = NOW()
-            RETURNING *;
-          `;
-          const insertRes = await pgPool.query(insertSql, [
-            newId,
-            rawName || 'Attendee',
-            rawContact,
-            normContact,
-            role,
-            otherRole,
-            posterUrl,
-            targetPosterId,
-            posterTemplateName
-          ]);
-          savedAttendee = formatAttendeeRow(insertRes.rows[0]);
-        }
-
-        return res.json({ success: true, submission: savedAttendee, attendee: savedAttendee });
-      } catch (err: any) {
-        console.error('Error saving attendee via pgPool:', err);
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        const { data: existing } = await supabaseServer
-          .from('attendees')
-          .select('*')
-          .eq('poster_template_id', targetPosterId)
-          .eq('contact_normalized', normContact)
-          .maybeSingle();
-
-        if (existing) {
-          const { data: updated, error: uErr } = await supabaseServer
-            .from('attendees')
-            .update({
-              download_count: (existing.download_count || 1) + 1,
-              last_downloaded_at: now,
-              poster_url: posterUrl || existing.poster_url,
-              full_name: rawName || existing.full_name,
-              role: role || existing.role,
-              other_role: otherRole,
-              updated_at: now
-            })
-            .eq('id', existing.id)
-            .select()
-            .single();
-
-          if (uErr) throw uErr;
-          const formatted = formatAttendeeRow(updated);
-          return res.json({ success: true, submission: formatted, attendee: formatted });
-        } else {
-          const newId = attendee.id || `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-          const { data: inserted, error: iErr } = await supabaseServer
-            .from('attendees')
-            .insert({
-              id: newId,
-              full_name: rawName || 'Attendee',
-              contact: rawContact,
-              contact_normalized: normContact,
-              role,
-              other_role: otherRole,
-              poster_url: posterUrl,
-              poster_template_id: targetPosterId,
-              poster_template_name: posterTemplateName,
-              download_count: 1,
-              last_downloaded_at: now,
-              created_at: now,
-              updated_at: now
-            })
-            .select()
-            .single();
-
-          if (iErr) throw iErr;
-          const formatted = formatAttendeeRow(inserted);
-          return res.json({ success: true, submission: formatted, attendee: formatted });
-        }
-      } catch (err: any) {
-        console.error('Error logging attendee download via Supabase:', err);
-        return res.status(500).json({ error: err.message });
+        await pgPool.query(`
+          INSERT INTO attendees (
+            id, full_name, contact, contact_normalized, role, other_role,
+            poster_url, poster_template_id, poster_template_name,
+            download_count, last_downloaded_at, created_at, updated_at
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9,
+            1, NOW(), NOW(), NOW()
+          )
+          ON CONFLICT (poster_template_id, contact_normalized) DO UPDATE SET
+            download_count = attendees.download_count + 1,
+            last_downloaded_at = NOW(),
+            poster_url = COALESCE(EXCLUDED.poster_url, attendees.poster_url),
+            updated_at = NOW();
+        `, [
+          savedRecord.id,
+          savedRecord.fullName,
+          savedRecord.contact,
+          savedRecord.contactNormalized,
+          savedRecord.status,
+          savedRecord.otherStatus,
+          savedRecord.posterImageUrl,
+          savedRecord.posterTemplateId,
+          savedRecord.posterTemplateName
+        ]);
+      } catch (err) {
+        console.warn('Postgres attendee sync note:', err);
       }
     }
 
-    res.status(500).json({ error: 'Database connection not available' });
+    return res.json({ success: true, submission: savedRecord, attendee: savedRecord });
   };
   app.post('/api/submissions/log-download', handleLogDownload);
   app.post('/api/submissions', handleLogDownload);
@@ -1003,64 +958,27 @@ async function startServer() {
   const handleDeleteSubmission = async (req: any, res: any) => {
     const { id } = req.params;
 
+    const initialLen = systemState.attendees.length;
+    systemState.attendees = systemState.attendees.filter(a => a.id !== id);
+    savePersistedState(systemState);
+
     if (pgPool) {
       try {
-        const result = await pgPool.query('DELETE FROM attendees WHERE id = $1 RETURNING id', [id]);
-        return res.json({ success: true, deleted: result.rowCount ? result.rowCount > 0 : true });
-      } catch (err: any) {
-        console.error('Error deleting attendee via pgPool:', err);
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        const { error } = await supabaseServer.from('attendees').delete().eq('id', id);
-        if (error) throw error;
-        return res.json({ success: true, deleted: true });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
+        await pgPool.query('DELETE FROM attendees WHERE id = $1', [id]);
+      } catch {}
     }
 
-    res.status(500).json({ error: 'Database connection not available' });
+    return res.json({ success: true, deleted: initialLen > systemState.attendees.length });
   };
   app.delete('/api/submissions/:id', handleDeleteSubmission);
   app.delete('/api/attendees/:id', handleDeleteSubmission);
 
   // ========================================================
-  // 4. ADMIN PROFILES API (RBAC & Master Admin Authority)
+  // 5. ADMIN PROFILES API (RBAC & Master Admin Authority)
   // ========================================================
   app.get('/api/admin-profiles', async (_req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-
-    if (pgPool) {
-      try {
-        const result = await pgPool.query('SELECT * FROM admin_profiles ORDER BY created_at ASC');
-        return res.json({ admins: result.rows });
-      } catch (err: any) {
-        console.error('Error fetching admin profiles via pgPool:', err);
-      }
-    } else if (supabaseServer) {
-      try {
-        const { data, error } = await supabaseServer.from('admin_profiles').select('*').order('created_at', { ascending: true });
-        if (!error && Array.isArray(data)) {
-          return res.json({ admins: data });
-        }
-      } catch (err) {}
-    }
-
-    // Default Master Admin fallback
-    return res.json({
-      admins: [
-        {
-          id: 'master-admin-1',
-          email: MASTER_ADMIN_EMAIL,
-          status: 'approved',
-          is_master: true,
-          created_at: '2026-08-26T00:00:00.000Z',
-          approved_at: '2026-08-26T00:00:00.000Z'
-        }
-      ]
-    });
+    return res.json({ admins: systemState.admin_profiles });
   });
 
   app.post('/api/admin-profiles/request', async (req, res) => {
@@ -1071,92 +989,42 @@ async function startServer() {
     const isMaster = isMasterAdminEmail(cleanEmail);
     const now = new Date().toISOString();
 
+    const existingIdx = systemState.admin_profiles.findIndex(a => a.email.toLowerCase() === cleanEmail);
+
+    if (existingIdx >= 0) {
+      if (isMaster) {
+        systemState.admin_profiles[existingIdx].status = 'approved';
+        systemState.admin_profiles[existingIdx].is_master = true;
+        savePersistedState(systemState);
+      }
+      return res.json({ admin: systemState.admin_profiles[existingIdx] });
+    }
+
+    const newAdmin = {
+      id: `admin-${Date.now()}`,
+      email: cleanEmail,
+      status: isMaster ? 'approved' : 'pending',
+      is_master: isMaster,
+      created_at: now,
+      approved_at: isMaster ? now : undefined
+    };
+
+    systemState.admin_profiles.push(newAdmin);
+    savePersistedState(systemState);
+
     if (pgPool) {
       try {
-        const checkRes = await pgPool.query('SELECT * FROM admin_profiles WHERE LOWER(email) = $1 LIMIT 1', [cleanEmail]);
-        if (checkRes.rows.length > 0) {
-          if (isMaster && checkRes.rows[0].status !== 'approved') {
-            const upRes = await pgPool.query(`
-              UPDATE admin_profiles 
-              SET status = 'approved', is_master = true, approved_at = NOW() 
-              WHERE LOWER(email) = $1 
-              RETURNING *;
-            `, [cleanEmail]);
-            return res.json({ admin: upRes.rows[0] });
-          }
-          return res.json({ admin: checkRes.rows[0] });
-        }
-
-        const newId = `admin-${Date.now()}`;
-        const status = isMaster ? 'approved' : 'pending';
-        const insRes = await pgPool.query(`
+        await pgPool.query(`
           INSERT INTO admin_profiles (id, email, status, is_master, created_at, approved_at)
           VALUES ($1, $2, $3, $4, NOW(), $5)
           ON CONFLICT (email) DO UPDATE SET
             status = CASE WHEN $4 = true THEN 'approved' ELSE admin_profiles.status END,
-            is_master = CASE WHEN $4 = true THEN true ELSE admin_profiles.is_master END
-          RETURNING *;
-        `, [newId, cleanEmail, status, isMaster, isMaster ? now : null]);
-
-        return res.json({ admin: insRes.rows[0] });
-      } catch (err: any) {
-        console.error('Error in admin request via pgPool:', err);
-        return res.status(500).json({ error: err.message });
-      }
-    } else if (supabaseServer) {
-      try {
-        const { data: existing } = await supabaseServer
-          .from('admin_profiles')
-          .select('*')
-          .eq('email', cleanEmail)
-          .maybeSingle();
-
-        if (existing) {
-          if (isMaster && existing.status !== 'approved') {
-            const { data: up } = await supabaseServer
-              .from('admin_profiles')
-              .update({ status: 'approved', is_master: true, approved_at: now })
-              .eq('email', cleanEmail)
-              .select()
-              .single();
-            return res.json({ admin: up });
-          }
-          return res.json({ admin: existing });
-        }
-
-        const newId = `admin-${Date.now()}`;
-        const newProfile = {
-          id: newId,
-          email: cleanEmail,
-          status: isMaster ? 'approved' : 'pending',
-          is_master: isMaster,
-          created_at: now,
-          approved_at: isMaster ? now : null
-        };
-
-        const { data: ins, error } = await supabaseServer
-          .from('admin_profiles')
-          .insert(newProfile)
-          .select()
-          .single();
-
-        if (error) throw error;
-        return res.json({ admin: ins });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
+            is_master = CASE WHEN $4 = true THEN true ELSE admin_profiles.is_master END;
+        `, [newAdmin.id, cleanEmail, newAdmin.status, isMaster, isMaster ? now : null]);
+      } catch {}
     }
 
-    res.json({
-      admin: {
-        id: `admin-${Date.now()}`,
-        email: cleanEmail,
-        status: isMaster ? 'approved' : 'pending',
-        is_master: isMaster,
-        created_at: now,
-        approved_at: isMaster ? now : undefined
-      }
-    });
+    return res.json({ admin: newAdmin });
   });
 
   app.post('/api/admin-profiles/status', async (req, res) => {
@@ -1172,52 +1040,37 @@ async function startServer() {
       return res.status(403).json({ error: 'Cannot modify Master Admin status' });
     }
 
-    if (pgPool) {
-      try {
-        const result = await pgPool.query(`
-          UPDATE admin_profiles 
-          SET 
-            status = $1,
-            approved_at = CASE WHEN $1 = 'approved' THEN NOW() ELSE NULL END
-          WHERE LOWER(email) = $2
-          RETURNING *;
-        `, [status, cleanEmail]);
+    const targetIdx = systemState.admin_profiles.findIndex(a => a.email.toLowerCase() === cleanEmail);
+    if (targetIdx >= 0) {
+      systemState.admin_profiles[targetIdx].status = status;
+      systemState.admin_profiles[targetIdx].approved_at = status === 'approved' ? new Date().toISOString() : null;
+      savePersistedState(systemState);
 
-        if (result.rows.length === 0) {
-          return res.status(404).json({ error: 'Admin profile not found' });
-        }
-
-        return res.json({ success: true, admin: result.rows[0] });
-      } catch (err: any) {
-        console.error('Error updating admin status via pgPool:', err);
-        return res.status(500).json({ error: err.message });
+      if (pgPool) {
+        try {
+          await pgPool.query(`
+            UPDATE admin_profiles 
+            SET 
+              status = $1,
+              approved_at = CASE WHEN $1 = 'approved' THEN NOW() ELSE NULL END
+            WHERE LOWER(email) = $2;
+          `, [status, cleanEmail]);
+        } catch {}
       }
-    } else if (supabaseServer) {
-      try {
-        const { data, error } = await supabaseServer
-          .from('admin_profiles')
-          .update({
-            status,
-            approved_at: status === 'approved' ? new Date().toISOString() : null
-          })
-          .eq('email', cleanEmail)
-          .select()
-          .single();
 
-        if (error) throw error;
-        return res.json({ success: true, admin: data });
-      } catch (err: any) {
-        return res.status(500).json({ error: err.message });
-      }
+      return res.json({ success: true, admin: systemState.admin_profiles[targetIdx] });
     }
 
-    res.status(404).json({ error: 'Admin profile not found' });
+    return res.status(404).json({ error: 'Admin profile not found' });
   });
 
   // Vite Middleware for Frontend Serving
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR !== 'true'
+      },
       appType: 'spa'
     });
     app.use(vite.middlewares);

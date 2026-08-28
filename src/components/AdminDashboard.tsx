@@ -58,6 +58,8 @@ import {
   fetchActivePosterTemplate,
   fetchAppSettings,
   saveAppSettings,
+  verifyMasterAdminCredentials,
+  changeMasterAdminKey,
   MASTER_ADMIN_EMAIL,
   isMasterAdmin,
   type AdminProfile,
@@ -117,6 +119,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
   // Delete attendee confirmation state
   const [attendeeToDelete, setAttendeeToDelete] = useState<AttendeeRecord | null>(null);
   const [isDeletingAttendee, setIsDeletingAttendee] = useState(false);
+
+  // Master Admin Security Key Management State
+  const [currMasterPass, setCurrMasterPass] = useState('');
+  const [newMasterPass, setNewMasterPass] = useState('');
+  const [confirmMasterPass, setConfirmMasterPass] = useState('');
+  const [masterPassLoading, setMasterPassLoading] = useState(false);
+  const [masterPassMsg, setMasterPassMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Product modal state
   const [editingProduct, setEditingProduct] = useState<MerchandiseProduct | null>(null);
@@ -225,6 +234,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
     const cleanEmail = email.trim().toLowerCase();
 
     try {
+      if (isMasterAdmin(cleanEmail)) {
+        const verifyRes = await verifyMasterAdminCredentials(cleanEmail, password);
+        if (!verifyRes.success && verifyRes.error) {
+          setAuthMessage({
+            type: 'error',
+            text: 'Invalid Master Admin password. Please check your master key password.'
+          });
+          return;
+        }
+
+        let profile = await fetchAdminProfileByEmail(cleanEmail);
+        if (!profile || profile.status !== 'approved' || !profile.is_master) {
+          profile = await requestAdminAccess(cleanEmail);
+        }
+        setCurrentUser(profile);
+        sessionStorage.setItem('utq_admin_email', cleanEmail);
+        sessionStorage.setItem('utq_master_key', password);
+        return;
+      }
+
       if (isSupabaseConfigured && supabase) {
         try {
           const { error } = await supabase.auth.signInWithPassword({
@@ -237,17 +266,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
         }
       }
 
-      let profile = await fetchAdminProfileByEmail(cleanEmail);
-
-      // If Master Admin, guarantee approved profile
-      if (isMasterAdmin(cleanEmail)) {
-        if (!profile || profile.status !== 'approved' || !profile.is_master) {
-          profile = await requestAdminAccess(cleanEmail);
-        }
-        setCurrentUser(profile);
-        sessionStorage.setItem('utq_admin_email', cleanEmail);
-        return;
-      }
+      const profile = await fetchAdminProfileByEmail(cleanEmail);
 
       if (!profile) {
         setAuthMessage({
@@ -319,10 +338,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
   // Log Out
   const handleLogout = () => {
     sessionStorage.removeItem('utq_admin_email');
+    sessionStorage.removeItem('utq_master_key');
     setCurrentUser(null);
     setEmail('');
     setPassword('');
     setAuthMessage(null);
+  };
+
+  // Change Master Admin Password / Key
+  const handleChangeMasterPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newMasterPass !== confirmMasterPass) {
+      setMasterPassMsg({ type: 'error', text: 'New passwords do not match.' });
+      return;
+    }
+    if (newMasterPass.length < 6) {
+      setMasterPassMsg({ type: 'error', text: 'Password must be at least 6 characters long.' });
+      return;
+    }
+
+    setMasterPassLoading(true);
+    setMasterPassMsg(null);
+    try {
+      const res = await changeMasterAdminKey(currMasterPass, newMasterPass);
+      if (res.success) {
+        setMasterPassMsg({ type: 'success', text: 'Master Admin security key updated and permanently locked.' });
+        setCurrMasterPass('');
+        setNewMasterPass('');
+        setConfirmMasterPass('');
+        setTimeout(() => setMasterPassMsg(null), 4000);
+      } else {
+        setMasterPassMsg({ type: 'error', text: res.error || 'Failed to update Master Admin password.' });
+      }
+    } catch (err: any) {
+      setMasterPassMsg({ type: 'error', text: err?.message || 'Failed to update Master Admin password.' });
+    } finally {
+      setMasterPassLoading(false);
+    }
   };
 
   // Admin Approval Action (Master Admin only)
@@ -781,6 +833,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
           </div>
         </div>
       </header>
+
+      {/* Master Admin Permanent Authority Banner */}
+      {currentUser.is_master && (
+        <div className="bg-amber-500/10 border-b border-amber-500/20 px-4 sm:px-8 py-2.5">
+          <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2.5 text-amber-300 font-medium">
+              <Shield size={16} className="text-[#DEA303] shrink-0" />
+              <span>
+                <strong className="text-amber-200">Master Admin Key Active:</strong> All changes to posters, merchandise, and site settings are permanently locked with your Master Password. The system will never revert or reset.
+              </span>
+            </div>
+            <span className="text-[11px] text-amber-400 font-mono bg-amber-500/20 px-2.5 py-1 rounded-full border border-amber-500/30 font-semibold">
+              🔒 Master Key Protected
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-8 space-y-6">
@@ -1244,6 +1313,112 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
                 </button>
               </div>
             </div>
+
+            {/* SECTION 0: MASTER ADMIN KEY & SYSTEM PERMANENCE (Master Admin only) */}
+            {currentUser.is_master && (
+              <div className="bg-slate-900 border border-amber-500/30 rounded-xl p-6 space-y-5 relative overflow-hidden">
+                <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 via-[#DEA303] to-amber-600" />
+                <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-800">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                      <Lock className="w-5 h-5 text-[#DEA303]" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                        Master Admin Security Key & System Permanence
+                        <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full border border-amber-500/30 font-mono font-semibold">
+                          Permanent Lock
+                        </span>
+                      </h4>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Posters, merchandise items, contact numbers, and thank-you notes saved by the Master Admin are permanently locked into the system. The site has no power to revert to any default or empty state.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <form onSubmit={handleChangeMasterPassword} className="space-y-4 max-w-2xl">
+                  <p className="text-xs font-semibold text-slate-300">
+                    Update Master Admin Password (Key to authorize all system changes):
+                  </p>
+
+                  {masterPassMsg && (
+                    <div className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
+                      masterPassMsg.type === 'success' 
+                        ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30' 
+                        : 'bg-red-500/10 text-red-300 border border-red-500/30'
+                    }`}>
+                      {masterPassMsg.type === 'success' ? <Check size={15} /> : <AlertCircle size={15} />}
+                      <span>{masterPassMsg.text}</span>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                        Current Master Key
+                      </label>
+                      <input
+                        type="password"
+                        value={currMasterPass}
+                        onChange={(e) => setCurrMasterPass(e.target.value)}
+                        placeholder="Current password"
+                        required
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white placeholder-slate-600 outline-none focus:border-[#DEA303] text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                        New Master Key
+                      </label>
+                      <input
+                        type="password"
+                        value={newMasterPass}
+                        onChange={(e) => setNewMasterPass(e.target.value)}
+                        placeholder="New password (min 6 chars)"
+                        required
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white placeholder-slate-600 outline-none focus:border-[#DEA303] text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                        Confirm New Key
+                      </label>
+                      <input
+                        type="password"
+                        value={confirmMasterPass}
+                        onChange={(e) => setConfirmMasterPass(e.target.value)}
+                        placeholder="Re-type new password"
+                        required
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white placeholder-slate-600 outline-none focus:border-[#DEA303] text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={masterPassLoading || !currMasterPass || !newMasterPass || !confirmMasterPass}
+                      className="px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 font-bold text-xs rounded-xl transition flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      {masterPassLoading ? (
+                        <>
+                          <DottedLoader size="sm" color="#f59e0b" />
+                          <span>Updating Master Key...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Lock size={13} />
+                          <span>Update Master Password</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
 
             {/* SECTION 1: THANK YOU NOTE */}
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-5">

@@ -77,7 +77,7 @@ export { posterAssetUrl };
 const imageCache = new Map<string, HTMLImageElement>();
 
 /**
- * Loads an image with high-speed memory caching
+ * Loads an image with high-speed memory caching and error recovery
  */
 export function loadImage(src: string): Promise<HTMLImageElement> {
   if (!src) return Promise.reject(new Error('No image source provided'));
@@ -91,9 +91,16 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
 
   return new Promise((resolve, reject) => {
     const img = new Image();
-    if (!src.startsWith('data:')) {
+    const isData = src.startsWith('data:');
+    const isBlob = src.startsWith('blob:');
+    const isRemote = src.startsWith('http://') || src.startsWith('https://');
+    const isSameOrigin = typeof window !== 'undefined' && isRemote && src.startsWith(window.location.origin);
+
+    // Only apply crossOrigin to remote cross-origin requests to prevent CORS issues on relative assets
+    if (isRemote && !isSameOrigin && !isData && !isBlob) {
       img.crossOrigin = 'anonymous';
     }
+
     img.onload = async () => {
       try {
         if ('decode' in img) await img.decode();
@@ -101,9 +108,10 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
       imageCache.set(src, img);
       resolve(img);
     };
-    img.onerror = (e) => {
-      // In case of CORS error on remote URLs, try loading without crossOrigin
-      if (img.crossOrigin && !src.startsWith('data:')) {
+
+    img.onerror = () => {
+      // In case of CORS error with crossOrigin on remote URLs, retry without crossOrigin
+      if (img.crossOrigin && !isData && !isBlob) {
         const retryImg = new Image();
         retryImg.onload = async () => {
           try {
@@ -112,10 +120,10 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
           imageCache.set(src, retryImg);
           resolve(retryImg);
         };
-        retryImg.onerror = (err) => reject(err);
+        retryImg.onerror = () => reject(new Error(`Failed to load image asset`));
         retryImg.src = src;
       } else {
-        reject(e);
+        reject(new Error(`Failed to load image asset`));
       }
     };
     img.src = src;
@@ -124,7 +132,7 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
 
 // Preload base poster immediately for instantaneous composition
 if (typeof window !== 'undefined') {
-  loadImage(DEFAULT_POSTER_TEMPLATE.image_url).catch(() => {});
+  loadImage(DEFAULT_POSTER_TEMPLATE.image_url || posterAssetUrl || '/poster.png').catch(() => {});
 }
 
 // Reusable canvas instance for optimal memory and garbage collection prevention
@@ -162,14 +170,34 @@ export async function composePoster(
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = scale < 0.5 ? 'medium' : 'high';
 
-  // 1. Draw Base Official Poster (Immutable background asset - cached in memory)
-  try {
-    const baseImg = await loadImage(template.image_url || posterAssetUrl || '/poster.png');
-    ctx.drawImage(baseImg, 0, 0, canvas.width, canvas.height);
-  } catch (baseErr) {
-    console.warn('Could not draw base poster template:', baseErr);
-    // Fallback solid gradient canvas
-    ctx.fillStyle = '#0B2776';
+  // 1. Draw Base Official Poster (Immutable background asset - with layered multi-source fallback)
+  let baseDrawn = false;
+  const candidateUrls = [
+    template.image_url,
+    posterAssetUrl,
+    '/poster.png'
+  ].filter((u): u is string => Boolean(u && typeof u === 'string'));
+
+  // Remove duplicates while preserving priority order
+  const uniqueUrls = Array.from(new Set(candidateUrls));
+
+  for (const url of uniqueUrls) {
+    try {
+      const baseImg = await loadImage(url);
+      ctx.drawImage(baseImg, 0, 0, canvas.width, canvas.height);
+      baseDrawn = true;
+      break;
+    } catch {
+      // Continue to next fallback URL smoothly
+    }
+  }
+
+  if (!baseDrawn) {
+    // Fallback luxury deep navy gradient
+    const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    grad.addColorStop(0, '#071848');
+    grad.addColorStop(1, '#0B2776');
+    ctx.fillStyle = grad;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 

@@ -271,6 +271,54 @@ export async function checkSupabaseHealth(): Promise<SupabaseHealth> {
   };
 }
 
+export function getAuthHeaders(): Record<string, string> {
+  const email = typeof window !== 'undefined' ? (sessionStorage.getItem('utq_admin_email') || '') : '';
+  const key = typeof window !== 'undefined' ? (sessionStorage.getItem('utq_master_key') || '') : '';
+  return {
+    'Content-Type': 'application/json',
+    'x-admin-email': email,
+    'x-master-key': key
+  };
+}
+
+export async function verifyMasterAdminCredentials(email: string, password?: string): Promise<{ success: boolean; is_master: boolean; role?: string; error?: string }> {
+  try {
+    const res = await fetch('/api/admin/verify-master-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      return { success: false, is_master: false, error: data?.error || 'Verification failed' };
+    }
+    return { success: true, is_master: Boolean(data.is_master), role: data.role };
+  } catch (err: any) {
+    return { success: false, is_master: false, error: err?.message || 'Network error' };
+  }
+}
+
+export async function changeMasterAdminKey(currentPassword: string, newPassword: string): Promise<{ success: boolean; message?: string; error?: string }> {
+  try {
+    const email = typeof window !== 'undefined' ? (sessionStorage.getItem('utq_admin_email') || MASTER_ADMIN_EMAIL) : MASTER_ADMIN_EMAIL;
+    const res = await fetch('/api/admin/change-master-key', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ email, currentPassword, newPassword })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      return { success: false, error: data?.error || 'Failed to change master key' };
+    }
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('utq_master_key', newPassword);
+    }
+    return { success: true, message: data.message };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Network error' };
+  }
+}
+
 // ----------------------------------------------------
 // POSTER TEMPLATE OPERATIONS (VIA SERVER API / SUPABASE)
 // ----------------------------------------------------
@@ -333,7 +381,7 @@ export async function savePosterTemplate(template: PosterTemplate, createdBy = '
 
   const res = await fetch('/api/posters', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify(updated)
   });
 
@@ -352,7 +400,7 @@ export async function savePosterTemplate(template: PosterTemplate, createdBy = '
 export async function setActivePosterTemplate(posterId: string): Promise<void> {
   const res = await fetch('/api/posters/active', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ templateId: posterId, posterId })
   });
 
@@ -368,7 +416,7 @@ export async function setActivePosterTemplate(posterId: string): Promise<void> {
 export async function archivePosterTemplate(posterId: string): Promise<void> {
   await fetch(`/api/posters/${encodeURIComponent(posterId)}/archive`, { 
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' }
+    headers: getAuthHeaders()
   });
 }
 
@@ -377,7 +425,8 @@ export async function archivePosterTemplate(posterId: string): Promise<void> {
  */
 export async function deletePosterTemplate(posterId: string): Promise<PosterTemplate[]> {
   const res = await fetch(`/api/posters/${encodeURIComponent(posterId)}`, { 
-    method: 'DELETE' 
+    method: 'DELETE',
+    headers: getAuthHeaders()
   });
 
   if (!res.ok) {
@@ -399,7 +448,7 @@ export async function deletePosterTemplate(posterId: string): Promise<PosterTemp
 export async function purgeInactivePosterTemplates(): Promise<PosterTemplate[]> {
   const res = await fetch('/api/posters/purge-archived', { 
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' }
+    headers: getAuthHeaders()
   });
 
   if (res.ok) {
@@ -517,7 +566,8 @@ export async function fetchAllAttendees(posterId?: string): Promise<LocalSubmiss
  */
 export async function deleteAttendee(id: string): Promise<void> {
   const res = await fetch(`/api/attendees/${encodeURIComponent(id)}`, { 
-    method: 'DELETE' 
+    method: 'DELETE',
+    headers: getAuthHeaders()
   });
 
   if (!res.ok) {
@@ -546,7 +596,7 @@ export async function fetchAppSettings(): Promise<AppSettings> {
 export async function saveAppSettings(settings: AppSettings): Promise<AppSettings> {
   const res = await fetch('/api/settings', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify(settings)
   });
 
@@ -632,7 +682,7 @@ export async function requestAdminAccess(email: string): Promise<AdminProfile> {
   try {
     const res = await fetch('/api/admin-profiles/request', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ email: cleanEmail })
     });
     if (res.ok) {
@@ -659,7 +709,7 @@ export async function updateAdminStatus(email: string, status: 'approved' | 'rej
 
   const res = await fetch('/api/admin-profiles/status', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ email: cleanEmail, status })
   });
 
